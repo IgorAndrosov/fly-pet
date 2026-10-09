@@ -1,4 +1,4 @@
-"""Спрайты мухи, версия 6: к виду сверху добавлено потирание лапок (груминг).
+"""Спрайты мухи, версия 7: лапки как на фото — длинные, веером; передние вынесены вперёд за голову.
 
 Кадры: idle 2, walk 6, sleep 3, chew 2, fly 4, land 1, rub 4.
 """
@@ -24,7 +24,17 @@ WING_FILL = (222, 240, 255, 140)
 WING_EDGE = (146, 190, 232, 205)
 WING_VEIN = (120, 164, 212, 150)
 WING_HL = (255, 255, 255, 90)
-LEG = (28, 28, 36, 255)
+LEG = (30, 30, 38, 255)
+LEG_HL = (74, 76, 92, 255)
+
+# геометрия лапок: корень, сгиб, кончик (в системе 64x64, x — вперёд к голове)
+LEG_GEOM = {
+    # кончики передних уходят вперёд ЗА голову, задних — назад за брюшко (как на фото)
+    "front": ((40.0, 4.0), (47.0, 7.0), (56.0, 9.5)),
+    "mid": ((33.0, 6.0), (36.0, 13.0), (36.0, 19.5)),
+    "hind": ((27.0, 6.0), (21.0, 12.5), (13.5, 17.0)),
+}
+LEG_ORDER = (("front", 0.0), ("mid", 0.33), ("hind", 0.66))
 
 
 def px(v: float) -> float:
@@ -61,32 +71,45 @@ def draw_wing(d, root, length, width, spread_deg, side, alpha_mul=1.0):
                width=int(0.7 * S))
 
 
-def draw_leg(d, root, out, back, side):
-    x0, y0 = px(root[0]), px(root[1])
-    x1, y1 = px(root[0] - back), px(root[1] + side * out)
-    x2, y2 = px(root[0] - back * 1.6), px(root[1] + side * out * 1.25)
-    d.line([(x0, y0), (x1, y1)], fill=LEG, width=int(1.4 * S))
-    d.line([(x1, y1), (x2, y2)], fill=LEG, width=int(1.0 * S))
+def seg(d, p0, p1, width, color=LEG):
+    d.line([(px(p0[0]), px(p0[1])), (px(p1[0]), px(p1[1]))], fill=color, width=int(width * S))
 
 
-def draw_front_rubbing(d, cy, phase: float, head_dy: float) -> None:
-    """Передние лапки у лица: трутся друг о друга в противофазе (одна вперёд, другая назад)."""
+def joint(d, p, r, color=LEG):
+    d.ellipse([px(p[0] - r), px(p[1] - r), px(p[0] + r), px(p[1] + r)], fill=color)
+
+
+def draw_leg(d, pair: str, side: int, cy: float, swing: float, leg_scale: float = 1.0) -> None:
+    """Лапка веером: корень у груди, сгиб наружу, кончик далеко.
+
+    swing —0..1: смещение вперёд-назад вдоль оси тела (шаг).
+    """
+    (root_x, root_y), (knee_x, knee_y), (tip_x, tip_y) = LEG_GEOM[pair]
+    cx, ky, ty = root_x + swing * 2.6, knee_y, tip_y
+    kx, tx = knee_x + swing * 1.4, tip_x + swing * 2.2
+    root = (cx, cy + side * root_y * leg_scale)
+    knee = (kx, cy + side * ky * leg_scale)
+    tip = (tx, cy + side * ty * leg_scale)
+    seg(d, root, knee, 1.5)
+    seg(d, knee, tip, 1.1)
+    joint(d, knee, 0.75, LEG_HL)
+    joint(d, tip, 0.6)
+
+
+def draw_front_rubbing(d, cy: float, phase: float) -> None:
+    """Передние лапки перед лицом: смыкаются у основания, кончики слегка разведены."""
     for side in (-1, 1):
-        # противофаза: левая и правая движутся навстречу друг другу
         rub = math.sin(phase * 2 * math.pi + (0.0 if side < 0 else math.pi))
-        root = (40.5, cy + side * 6.2)
-        knee = (44.8 + 1.6 * rub, cy + side * 4.0)
-        tip = (48.6 + 3.2 * rub, cy + side * 1.7)
-        rub_leg = (78, 80, 96, 255)
-        d.line([(px(root[0]), px(root[1])), (px(knee[0]), px(knee[1]))], fill=rub_leg,
-               width=int(1.5 * S))
-        d.line([(px(knee[0]), px(knee[1])), (px(tip[0]), px(tip[1]))], fill=rub_leg,
-               width=int(1.2 * S))
-        d.ellipse([px(tip[0] - 0.9), px(tip[1] - 0.9), px(tip[0] + 0.9), px(tip[1] + 0.9)],
-                  fill=rub_leg)
+        root = (40.0, cy + side * 4.0)
+        knee = (47.5 + 0.9 * rub, cy + side * 2.8)          # сомкнуты к центру
+        tip = (56.0 + 1.8 * rub, cy + side * 6.2)           # кончики разведены, впереди головы
+        seg(d, root, knee, 1.5, LEG_HL)
+        seg(d, knee, tip, 1.2, LEG_HL)
+        joint(d, knee, 0.8, LEG_HL)
+        joint(d, tip, 0.65, LEG_HL)
 
 
-def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float = 0.0,
+def draw_fly(*, legs_phase: float = 0.0, leg_scale: float = 1.0, body_dy: float = 0.0,
              spread_deg: float = 14.0, wing_len: float = 23.0, wing_width: float = 7.4,
              wing_alpha: float = 1.0, body_len: float = 1.0, head_dy: float = 0.0,
              chewing: bool = False, eyes_closed: bool = False,
@@ -96,16 +119,15 @@ def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float
 
     cy = 32 + body_dy
 
-    # --- лапки: три пары ---
-    for i, (bx, base_back) in enumerate(((27.0, -4.0), (33.0, 0.5), (39.0, 5.0))):
-        if i == 0 and rub_phase is not None:
-            continue                      # передние рисуются отдельно, в позе потирания
-        swing = math.sin((legs_phase + i * 0.33) * 2 * math.pi)
+    # --- лапки (под корпусом) ---
+    for pair, offset in LEG_ORDER:
         for side in (-1, 1):
-            s = -swing if (i + side) % 2 == 0 else swing
-            out = (6.4 + 1.6 * abs(s)) * leg_spread
-            back = (base_back + 3.2 * s) * leg_spread
-            draw_leg(d, (bx, cy + side * 6.0), out, back, side)
+            if pair == "front" and rub_phase is not None:
+                continue
+            swing = math.sin((legs_phase + offset) * 2 * math.pi)
+            if (pair == "front") == (side < 0):          # тренога: чередуем пары по сторонам
+                swing = -swing
+            draw_leg(d, pair, side, cy, swing, leg_scale)
 
     # --- брюшко ---
     ab = 16.0 * body_len
@@ -139,9 +161,9 @@ def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float
         d.line([(px(hx + 6.0), px(hy + 2.6)), (px(hx + 10.0), px(hy + 3.2))],
                fill=(92, 94, 108, 255), width=int(1.0 * S))
 
-    # --- передние лапки в позе потирания (поверх груди) ---
+    # --- передние лапки при груминге (поверх груди и головы) ---
     if rub_phase is not None:
-        draw_front_rubbing(d, cy, rub_phase, head_dy)
+        draw_front_rubbing(d, cy, rub_phase)
 
     # --- крылья поверх корпуса ---
     for side in (-1, 1):
@@ -160,11 +182,11 @@ def frames():
     for i in range(6):
         ph = i / 6.0
         out.append((f"walk_{i + 1}", draw_fly(
-            legs_phase=ph, leg_spread=1.0, body_dy=0.5 * math.sin(ph * 2 * math.pi),
+            legs_phase=ph, body_dy=0.5 * math.sin(ph * 2 * math.pi),
             spread_deg=18.0, wing_len=22.5, wing_width=7.2, wing_alpha=0.85)))
     for i in range(3):
         out.append((f"sleep_{i + 1}", draw_fly(
-            leg_spread=0.5, body_dy=0.6 + 0.25 * i, spread_deg=7.0, wing_len=22.0,
+            leg_scale=0.55, body_dy=0.6 + 0.25 * i, spread_deg=7.0, wing_len=22.0,
             wing_width=6.8, wing_alpha=1.0, body_len=1.04, eyes_closed=True)))
     for i in range(2):
         out.append((f"chew_{i + 1}", draw_fly(
@@ -177,17 +199,15 @@ def frames():
             (34.0, 0.95, 21.0, 8.2, -0.5))):
         out.append((f"fly_{i + 1}", draw_fly(
             spread_deg=spread, wing_len=ln, wing_width=wdt, wing_alpha=alpha,
-            leg_spread=0.45, body_dy=dy)))
+            leg_scale=0.5, body_dy=dy)))
     out.append(("land_1", draw_fly(
         spread_deg=26.0, wing_len=21.0, wing_width=8.6, wing_alpha=1.1,
-        leg_spread=1.2, body_dy=0.3)))
-    # потирание лапок: тело чуть приподнято, передние лапки трутся у головы
+        leg_scale=1.15, body_dy=0.3)))
     for i in range(4):
         ph = i / 4.0
         out.append((f"rub_{i + 1}", draw_fly(
             spread_deg=15.0, wing_len=22.5, wing_width=7.2, wing_alpha=0.95,
-            leg_spread=0.95, body_dy=-0.4 + 0.3 * math.sin(ph * 2 * math.pi),
-            head_dy=-0.5, rub_phase=ph)))
+            body_dy=-0.4 + 0.3 * math.sin(ph * 2 * math.pi), head_dy=-0.5, rub_phase=ph)))
     return out
 
 
@@ -217,13 +237,16 @@ def main() -> None:
     for name in ("idle", "walk", "sleep", "chew", "fly", "rub"):
         group = [im for n, im in fr if n.startswith(name)]
         save_gif(out / f"_{name}.gif", group, ms=300 if name == "sleep" else 120)
-    cell = SIZE * 6
-    new = [f for f in fr if f[0].startswith(("rub_",))]
-    sheet = Image.new("RGBA", (len(new) * (cell + 8) + 8, cell + 16), (240, 240, 240, 255))
-    for i, (_n, im) in enumerate(new):
-        sheet.alpha_composite(im.resize((cell, cell), Image.NEAREST), (8 + i * (cell + 8), 8))
-    sheet.save(out / "_rub_preview.png")
-    print("превью потирания:", out / "_rub_preview.png", sheet.size)
+    # крупное сравнение: покой, ходьба, груминг
+    picks = [f for f in fr if f[0] in ("idle_1", "walk_1", "walk_3", "rub_1", "rub_2", "rub_3")]
+    cell = SIZE * 7
+    sheet = Image.new("RGBA", (len(picks) * (cell + 8) + 8, cell + 16), (244, 244, 244, 255))
+    for i, (_n, im) in enumerate(picks):
+        bg = Image.new("RGBA", im.size, (244, 244, 244, 255))
+        bg.alpha_composite(im)
+        sheet.alpha_composite(bg.resize((cell, cell), Image.NEAREST), (8 + i * (cell + 8), 8))
+    sheet.save(out / "_legs_preview.png")
+    print("превью лапок:", out / "_legs_preview.png", sheet.size)
 
 
 if __name__ == "__main__":
