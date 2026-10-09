@@ -110,6 +110,12 @@ walk:
   ignore_titles: []               # заголовки, на которые садиться нельзя
   max_attach_attempts: 3          # подряд неудачных посадок, дальше — только стол
   seed: null                      # сид генератора (для тестов)
+  scare_cursor: true              # курсор отпугивает муху
+  scare_radius_px: 90             # радиус рывка от курсора, px
+  panic_radius_px: 40             # радиус паники (взлёт), px
+  scare_burst_px: [110, 240]      # длина рывка от испуга, px
+  scare_speed_px_s: 340           # скорость рывка от испуга, px/с
+  scare_cooldown_sec: 1.2         # пауза между испугами, с
 
 paths:
   hermes_env: "C:/Users/igora/AppData/Local/hermes/.env"

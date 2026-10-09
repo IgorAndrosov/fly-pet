@@ -39,6 +39,12 @@ def test_load_defaults(tmp_path: Path) -> None:
     assert cfg.walk.desktop_turn_deg == (20.0, 90.0)
     assert cfg.walk.desktop_fly_margin_px == 80
     assert cfg.walk.seed is None
+    assert cfg.walk.scare_cursor is True
+    assert cfg.walk.scare_radius_px == 90.0
+    assert cfg.walk.panic_radius_px == 40.0
+    assert cfg.walk.scare_burst_px == (110.0, 240.0)
+    assert cfg.walk.scare_speed_px_s == 340.0
+    assert cfg.walk.scare_cooldown_sec == 1.2
 
 
 def test_merge_settings_yaml(tmp_path: Path) -> None:

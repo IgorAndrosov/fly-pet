@@ -100,6 +100,7 @@ class FlyWindow(QWidget):
         self._dragging = False
         self._drag_offset = QPoint()
         self._click_through = False
+        self._user_hidden = False  # спрятана через трей — сторож не показывает
         self._facing = 1
         self._sprite_angle_deg = 0.0
         self._rotated_cache: dict[tuple[str, int], QPixmap] = {}
@@ -144,6 +145,18 @@ class FlyWindow(QWidget):
         self._bubble.say(text, ttl_ms=ttl_ms)
         if text and text.strip():
             self._bubble.place_near(self)
+
+    def set_user_hidden(self, hidden: bool) -> None:
+        """Спрятать/показать по запросу трея (сторож не отменяет)."""
+        self._user_hidden = bool(hidden)
+        if self._user_hidden:
+            self._bubble.hide()
+            self.hide()
+        else:
+            self.show()
+
+    def is_user_hidden(self) -> bool:
+        return self._user_hidden
 
     def set_state(self, name: str) -> None:
         """Переключает набор кадров анимации (mode или имя анимации)."""
@@ -192,8 +205,12 @@ class FlyWindow(QWidget):
         self._facing = int(pose.facing)
         self._sprite_angle_deg = float(self._locomotion.sprite_angle_deg())
         if self._state.mode not in {"sleep", "eat"}:
-            self._state.mode = self._locomotion.mode.value
-        self.move(int(round(pose.x)), int(round(pose.y)))
+            if self._locomotion.is_hold_still():
+                self._state.mode = "idle"
+            else:
+                self._state.mode = self._locomotion.mode.value
+        if not self._locomotion.is_hold_still():
+            self.move(int(round(pose.x)), int(round(pose.y)))
         anim = _MODE_TO_ANIM.get(pose.anim, pose.anim)
         self._player.set_state(anim)
         self._sync_anim_fps(anim)
@@ -368,6 +385,8 @@ class FlyWindow(QWidget):
 
     def _on_desktop_reassert(self) -> None:
         """Тик сторожа: восстановить видимость и поднять окно над рабочим столом."""
+        if self._user_hidden:
+            return
         if self.isMinimized():
             self.setWindowState(Qt.WindowState.WindowNoState)
         if not self.isVisible():

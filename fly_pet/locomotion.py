@@ -7,6 +7,7 @@ import logging
 import math
 import random
 import sys
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Protocol, Sequence
@@ -14,6 +15,16 @@ from typing import Callable, Protocol, Sequence
 from ctypes import wintypes
 
 logger = logging.getLogger("fly_pet")
+
+
+def get_cursor_pos() -> tuple[float, float] | None:
+    """Позиция курсора (экранные координаты); вне Windows — None."""
+    if sys.platform != "win32":
+        return None
+    pt = wintypes.POINT()
+    if not ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+        return None
+    return float(pt.x), float(pt.y)
 
 GWL_STYLE = -16
 GWL_EXSTYLE = -20
@@ -542,6 +553,7 @@ class Locomotion(LocomotionDriver):
         api: WindowApi,
         our_hwnd_getter: Callable[[], int] | None = None,
         rng: random.Random | None = None,
+        cursor_getter: Callable[[], tuple[float, float] | None] | None = None,
     ) -> None:
         self._cfg = walk_cfg
         self._pet_w = int(pet_width)
@@ -549,6 +561,7 @@ class Locomotion(LocomotionDriver):
         self._desktop = desktop
         self._api = api
         self._our_hwnd_getter = our_hwnd_getter or (lambda: 0)
+        self._cursor_getter = cursor_getter or get_cursor_pos
         seed = getattr(walk_cfg, "seed", None)
         self._rng = rng if rng is not None else random.Random(seed)
         self._mode = LocomotionMode.DESKTOP
@@ -559,6 +572,10 @@ class Locomotion(LocomotionDriver):
         self._facing = 1
         self._vx = 0.0
         self._paused = False
+        self._hold_still = False
+        self._scare_cursor = bool(getattr(walk_cfg, "scare_cursor", True))
+        self._scare_cooldown_until = 0.0
+        self._burst_speed_override: float | None = None
         self._stay_left = self._roll_stay(
             getattr(walk_cfg, "desktop_stay_sec", (8.0, 25.0))
         )
@@ -628,6 +645,24 @@ class Locomotion(LocomotionDriver):
     def pause(self) -> None:
         self._paused = True
 
+    def set_hold_still(self, value: bool) -> None:
+        """Стоять на месте: не ходит и не летает."""
+        self._hold_still = bool(value)
+        if self._hold_still:
+            self._anim = "idle"
+            self._vx = 0.0
+            self._burst_speed_override = None
+
+    def is_hold_still(self) -> bool:
+        return self._hold_still
+
+    def set_scare_cursor(self, value: bool) -> None:
+        """Вкл/выкл отпугивание курсором (на лету)."""
+        self._scare_cursor = bool(value)
+
+    def scare_cursor_enabled(self) -> bool:
+        return self._scare_cursor
+
     def resume_from_desktop(self, x: float, y: float) -> None:
         """После перетаскивания человеком — снова с рабочего стола."""
         self._paused = False
@@ -644,7 +679,11 @@ class Locomotion(LocomotionDriver):
         self._stay_left = self._roll_stay(
             getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
         )
-        self._begin_burst()
+        if not self._hold_still:
+            self._begin_burst()
+        else:
+            self._anim = "idle"
+            self._vx = 0.0
         our = self._our_hwnd_getter()
         if our:
             self._api.detach_to_desktop(our)
@@ -653,8 +692,11 @@ class Locomotion(LocomotionDriver):
         self._desktop = desktop
 
     def step(self, dt_sec: float) -> LocomotionPose:
-        if self._paused or dt_sec <= 0:
+        if self._paused or self._hold_still or dt_sec <= 0:
+            if self._hold_still:
+                self._anim = "idle"
             return self.pose
+        self._maybe_scare()
         dt = float(dt_sec)
         if self._state == LocomotionState.ON_DESKTOP:
             self._step_desktop(dt)
@@ -719,9 +761,89 @@ class Locomotion(LocomotionDriver):
     def _sync_facing_from_heading(self) -> None:
         self._facing = _heading_to_facing(self._heading_deg)
 
+    def _burst_speed(self) -> float:
+        if self._burst_speed_override is not None:
+            return abs(float(self._burst_speed_override))
+        return abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
+
+    def _maybe_scare(self) -> None:
+        """Рывок от курсора или панический взлёт (если включено и кулдаун прошёл)."""
+        if not self._scare_cursor:
+            return
+        if self._state not in {
+            LocomotionState.ON_DESKTOP,
+            LocomotionState.ON_WINDOW,
+        }:
+            return
+        now = time.monotonic()
+        if now < self._scare_cooldown_until:
+            return
+        cursor = self._cursor_getter()
+        if cursor is None:
+            return
+        cx, cy = cursor
+        fx = self._x + self._pet_w / 2.0
+        fy = self._y + self._pet_h / 2.0
+        away_dx = fx - cx
+        away_dy = fy - cy
+        dist = math.hypot(away_dx, away_dy)
+        scare_r = float(getattr(self._cfg, "scare_radius_px", 90))
+        panic_r = float(getattr(self._cfg, "panic_radius_px", 40))
+        if dist >= scare_r:
+            return
+        cooldown = float(getattr(self._cfg, "scare_cooldown_sec", 1.2))
+        self._scare_cooldown_until = now + cooldown
+        if dist < panic_r:
+            logger.debug(
+                "испуг: dist=%.1f паника (away=(%.1f, %.1f))",
+                dist,
+                away_dx,
+                away_dy,
+            )
+            self._begin_takeoff()
+            return
+        logger.debug(
+            "испуг: dist=%.1f рывок (away=(%.1f, %.1f))",
+            dist,
+            away_dx,
+            away_dy,
+        )
+        self._begin_scare_burst(away_dx, away_dy)
+
+    def _begin_scare_burst(self, away_dx: float, away_dy: float) -> None:
+        """Немедленный рывок в сторону от курсора."""
+        burst = self._roll_pair(
+            getattr(self._cfg, "scare_burst_px", (110.0, 240.0))
+        )
+        speed = abs(float(getattr(self._cfg, "scare_speed_px_s", 340)))
+        self._burst_speed_override = speed
+        self._last_burst_px = burst
+        self._last_burst_was_long = False
+        self._burst_left = burst
+        self._pause_left = 0.0
+        self._walk_phase = "burst"
+        self._anim = "walk"
+        if self._mode == LocomotionMode.WINDOW:
+            if abs(away_dx) < 1e-6:
+                away_dx = 1.0 if self._facing >= 0 else -1.0
+            self._heading_deg = 0.0 if away_dx >= 0 else 180.0
+            self._sync_facing_from_heading()
+            self._vx = speed * (1 if self._facing >= 0 else -1)
+        else:
+            length = math.hypot(away_dx, away_dy)
+            if length < 1e-6:
+                away_dx, away_dy = float(self._facing), 0.0
+                length = 1.0
+            self._heading_deg = _norm_angle_deg(
+                math.degrees(math.atan2(away_dy / length, away_dx / length))
+            )
+            self._sync_facing_from_heading()
+            self._vx = speed
+
     def _begin_burst(self) -> None:
         dist, is_long = self._roll_burst_distance()
-        speed = abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
+        self._burst_speed_override = None
+        speed = self._burst_speed()
         self._last_burst_px = dist
         self._last_burst_was_long = is_long
         self._burst_left = dist
@@ -740,6 +862,7 @@ class Locomotion(LocomotionDriver):
             self._vx = speed
 
     def _begin_pause(self) -> None:
+        self._burst_speed_override = None
         turn_chance = float(getattr(self._cfg, "turn_on_pause_chance", 0.35))
         turned = self._rng.random() < turn_chance
         self._last_pause_turn_delta = 0.0
@@ -831,7 +954,7 @@ class Locomotion(LocomotionDriver):
     def _advance_burst_x(self, cur_x: float, dt: float, lo: float, hi: float) -> float:
         """Сдвинуть X на один тик рывка (режим окна); вернуть новую координату."""
         self._anim = "walk"
-        speed = abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
+        speed = self._burst_speed()
         if abs(self._vx) < 1e-9:
             self._vx = speed * (1 if self._facing >= 0 else -1)
         step = min(abs(self._vx) * dt, max(0.0, self._burst_left))
@@ -854,7 +977,7 @@ class Locomotion(LocomotionDriver):
     def _advance_burst_desktop(self, dt: float) -> None:
         """Рывок по столу в направлении heading с отражением от краёв."""
         self._anim = "walk"
-        speed = abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
+        speed = self._burst_speed()
         step = min(speed * dt, max(0.0, self._burst_left))
         if step <= 0:
             self._begin_pause()

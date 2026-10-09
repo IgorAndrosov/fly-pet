@@ -9,13 +9,15 @@ from typing import Any
 
 import yaml
 
+from fly_pet.paths import default_data_dir, resource_dir
+
 
 class ConfigError(Exception):
     """Ошибка чтения или валидации конфигурации."""
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return resource_dir()
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -215,6 +217,12 @@ class WalkConfig:
     ignore_titles: list[str]
     max_attach_attempts: int
     seed: int | None
+    scare_cursor: bool
+    scare_radius_px: float
+    panic_radius_px: float
+    scare_burst_px: tuple[float, float]
+    scare_speed_px_s: float
+    scare_cooldown_sec: float
 
 
 @dataclass(frozen=True)
@@ -460,6 +468,22 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
             walk_raw.get("max_attach_attempts"), "walk.max_attach_attempts"
         ),
         seed=walk_seed,
+        scare_cursor=_as_bool(walk_raw.get("scare_cursor"), "walk.scare_cursor"),
+        scare_radius_px=_as_float(
+            walk_raw.get("scare_radius_px"), "walk.scare_radius_px"
+        ),
+        panic_radius_px=_as_float(
+            walk_raw.get("panic_radius_px"), "walk.panic_radius_px"
+        ),
+        scare_burst_px=_as_float_pair(
+            walk_raw.get("scare_burst_px"), "walk.scare_burst_px"
+        ),
+        scare_speed_px_s=_as_float(
+            walk_raw.get("scare_speed_px_s"), "walk.scare_speed_px_s"
+        ),
+        scare_cooldown_sec=_as_float(
+            walk_raw.get("scare_cooldown_sec"), "walk.scare_cooldown_sec"
+        ),
     )
 
     return Config(
@@ -496,21 +520,25 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def resolve_data_dir(repo_root: Path, data_dir: Path | None = None) -> Path:
-    """Приоритет: аргумент → FLY_PET_DATA_DIR → <repo>/_data."""
+def resolve_data_dir(
+    repo_root: Path | None = None,
+    data_dir: Path | None = None,
+) -> Path:
+    """Приоритет: аргумент → FLY_PET_DATA_DIR → default_data_dir()."""
+    del repo_root  # сохранён для совместимости вызовов; дефолт — app_dir/_data
     if data_dir is not None:
         return data_dir.expanduser().resolve()
     env = os.environ.get("FLY_PET_DATA_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    return (repo_root / "_data").resolve()
+    return default_data_dir().resolve()
 
 
 def load_config(
     repo_root: Path | None = None,
     data_dir: Path | None = None,
 ) -> Config:
-    root = (repo_root or _repo_root()).resolve()
+    root = (repo_root or resource_dir()).resolve()
     default_path = root / "config" / "default.yaml"
     if not default_path.is_file():
         raise ConfigError(f"Не найден дефолтный конфиг: {default_path}")

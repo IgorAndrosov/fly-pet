@@ -25,7 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.gui:
+    # В сборке PyInstaller exe без аргументов сразу открывает GUI.
+    if args.gui or getattr(sys, "frozen", False):
         from fly_pet.app import run
 
         return run()

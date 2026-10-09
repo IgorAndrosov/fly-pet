@@ -49,6 +49,15 @@ class Needs:
     def mode(self) -> str:
         return self._mode
 
+    def force_sleep(self) -> None:
+        """Принудительный сон (меню трея)."""
+        self._mode = "sleep"
+
+    def force_wake(self) -> None:
+        """Принудительное пробуждение (меню трея)."""
+        if self._mode == "sleep":
+            self._mode = "idle"
+
     def snapshot(self) -> dict[str, float]:
         return {key: float(self._values[key]) for key in NEED_KEYS}
 

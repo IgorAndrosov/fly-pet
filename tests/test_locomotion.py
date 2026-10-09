@@ -44,6 +44,12 @@ class FakeWalk:
     ignore_titles: list[str] | None = None
     max_attach_attempts: int = 3
     seed: int | None = 1
+    scare_cursor: bool = False  # в тестах по умолчанию выкл., чтобы не мешать
+    scare_radius_px: float = 90.0
+    panic_radius_px: float = 40.0
+    scare_burst_px: tuple[float, float] = (110.0, 240.0)
+    scare_speed_px_s: float = 340.0
+    scare_cooldown_sec: float = 1.2
 
     def __post_init__(self) -> None:
         if self.ignore_titles is None:
@@ -888,3 +894,60 @@ def test_sprite_angle_cardinals() -> None:
     assert loco.sprite_angle_deg() == pytest.approx(90.0, abs=1.0)
     loco._flight_x1, loco._flight_y1 = 0.0, 100.0
     assert abs(loco.sprite_angle_deg()) == pytest.approx(180.0, abs=1.0)
+
+
+def test_scare_burst_away_from_cursor() -> None:
+    cursor = {"pos": (100.0, 400.0)}
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            scare_cursor=True,
+            scare_radius_px=200.0,
+            panic_radius_px=20.0,
+            scare_burst_px=(80.0, 80.0),
+            scare_speed_px_s=300.0,
+            scare_cooldown_sec=5.0,
+            desktop_stay_sec=(1000.0, 1000.0),
+            seed=3,
+        ),
+        seed=3,
+    )
+    loco._cursor_getter = lambda: cursor["pos"]
+    loco._x, loco._y = 200.0, 352.0  # центр ~(248, 400), курсор слева
+    before_x = loco._x
+    loco.step(0.05)
+    assert loco._walk_phase == "burst"
+    assert loco._burst_speed_override == pytest.approx(300.0)
+    # Рывок вправо — от курсора
+    assert loco._heading_deg == pytest.approx(0.0, abs=30.0)
+    loco.step(0.1)
+    assert loco._x > before_x
+
+
+def test_scare_panic_takeoff() -> None:
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            scare_cursor=True,
+            scare_radius_px=200.0,
+            panic_radius_px=80.0,
+            scare_cooldown_sec=5.0,
+            fly_to_window_chance=0.0,
+            desktop_stay_sec=(1000.0, 1000.0),
+            seed=5,
+        ),
+        seed=5,
+    )
+    loco._x, loco._y = 200.0, 352.0
+    cx = loco._x + 48
+    cy = loco._y + 48
+    loco._cursor_getter = lambda: (cx, cy)
+    loco.step(0.05)
+    assert loco.state == LocomotionState.TAKEOFF
+
+
+def test_hold_still_freezes() -> None:
+    loco, _, _ = _make_loco(seed=9)
+    loco.set_hold_still(True)
+    x0, y0 = loco._x, loco._y
+    loco.step(0.2)
+    assert loco._x == x0 and loco._y == y0
+    assert loco.pose.anim == "idle"

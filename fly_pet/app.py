@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 import time
-from pathlib import Path
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
@@ -14,15 +13,13 @@ from fly_pet.config import Config, load_config
 from fly_pet.locomotion import Locomotion, Rect, Win32WindowApi
 from fly_pet.logging_setup import setup_logging
 from fly_pet.needs import Needs
+from fly_pet.paths import resource_dir
 from fly_pet.phrases import pick
 from fly_pet.state import StateStore
+from fly_pet.tray import TrayController
 from fly_pet.window import FlyWindow
 
 _SAVE_INTERVAL_SEC = 60.0
-
-
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def _mode_to_anim(mode: str) -> str:
@@ -45,7 +42,10 @@ def build_app(config: Config, state_store: StateStore) -> QApplication:
     if app is None:
         app = QApplication(sys.argv)
 
-    frames = load_frames(_repo_root())
+    # Не завершать приложение при закрытии последнего окна (есть трей).
+    app.setQuitOnLastWindowClosed(False)
+
+    frames = load_frames(resource_dir())
     state = state_store.load()
     # Стартовые needs из конфига, если state ещё дефолтный и файла не было — уже в state;
     # не перетираем сохранённые значения.
@@ -102,11 +102,38 @@ def build_app(config: Config, state_store: StateStore) -> QApplication:
     needs_timer.timeout.connect(on_needs_tick)
     needs_timer.start()
 
+    def quit_app() -> None:
+        window.persist_state()
+        needs_timer.stop()
+        anim_timer = window._timer
+        if anim_timer is not None:
+            anim_timer.stop()
+        loco_timer = window._loco_timer
+        if loco_timer is not None:
+            loco_timer.stop()
+        reassert = window._desktop_reassert_timer
+        if reassert is not None:
+            reassert.stop()
+        if tray is not None:
+            tray.hide()
+        window.hide()
+        app.quit()
+
+    tray = TrayController(
+        window=window,
+        needs=needs,
+        state=state,
+        on_quit=quit_app,
+        parent=window,
+    )
+
     app._fly_window = window  # type: ignore[attr-defined]
     app._needs = needs  # type: ignore[attr-defined]
     app._needs_timer = needs_timer  # type: ignore[attr-defined]
     app._animation_timer = window._timer  # type: ignore[attr-defined]
     app._on_needs_tick = on_needs_tick  # type: ignore[attr-defined]
+    app._tray = tray  # type: ignore[attr-defined]
+    app._quit_app = quit_app  # type: ignore[attr-defined]
     app.aboutToQuit.connect(window.persist_state)
 
     window.show()
