@@ -110,3 +110,49 @@ def test_click_through_toggle(window: FlyWindow) -> None:
 def test_set_state_public(window: FlyWindow) -> None:
     window.set_state("sleep")
     assert window._player.state == "sleep"
+
+
+def _expected_corner(qapp: QApplication, cfg) -> QPoint:
+    geo = qapp.primaryScreen().availableGeometry()
+    return QPoint(
+        geo.x() + geo.width() - cfg.window.width - 24,
+        geo.y() + geo.height() - cfg.window.height - 24,
+    )
+
+
+def _make_window(tmp_path: Path, pose: dict | None = None) -> FlyWindow:
+    cfg = load_config(repo_root=REPO_ROOT, data_dir=tmp_path)
+    store = StateStore(tmp_path)
+    state = default_state()
+    if pose is not None:
+        state.pose = pose
+        store.save(state)
+        state = store.load()
+    frames = load_frames(REPO_ROOT)
+    win = FlyWindow(cfg, store, state, frames)
+    win.show()
+    QApplication.processEvents()
+    return win
+
+
+def test_default_pose_opens_bottom_right(qapp: QApplication, tmp_path: Path) -> None:
+    """Без сохранённой позы — правый нижний угол, не (0,0); state.json не нужен."""
+    assert not (tmp_path / "state.json").exists()
+    win = _make_window(tmp_path)
+    cfg = load_config(repo_root=REPO_ROOT, data_dir=tmp_path)
+    expected = _expected_corner(qapp, cfg)
+    assert win.pos() != QPoint(0, 0)
+    assert win.pos() == expected
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_saved_pose_respected(qapp: QApplication, tmp_path: Path) -> None:
+    del qapp
+    win = _make_window(tmp_path, {"x": 300, "y": 200, "facing": "left"})
+    assert win.pos() == QPoint(300, 200)
+
+
+def test_out_of_bounds_pose_falls_back_to_corner(qapp: QApplication, tmp_path: Path) -> None:
+    win = _make_window(tmp_path, {"x": -5000, "y": -5000, "facing": "left"})
+    cfg = load_config(repo_root=REPO_ROOT, data_dir=tmp_path)
+    assert win.pos() == _expected_corner(qapp, cfg)

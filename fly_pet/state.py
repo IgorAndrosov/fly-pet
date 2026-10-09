@@ -36,7 +36,7 @@ def default_needs() -> dict[str, float]:
 
 
 def default_pose() -> dict[str, Any]:
-    return {"x": 0, "y": 0, "facing": "left"}
+    return {"x": None, "y": None, "facing": "left"}
 
 
 def default_last_action() -> dict[str, Any]:
