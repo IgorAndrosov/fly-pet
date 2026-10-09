@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import QApplication
 
 from fly_pet.animation import load_frames
 from fly_pet.config import Config, load_config
+from fly_pet.locomotion import Locomotion, Rect, Win32WindowApi
 from fly_pet.logging_setup import setup_logging
 from fly_pet.needs import Needs
 from fly_pet.phrases import pick
@@ -30,6 +31,14 @@ def _mode_to_anim(mode: str) -> str:
     return mode if mode in {"idle", "walk", "sleep"} else "idle"
 
 
+def _desktop_rect() -> Rect:
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return Rect(0, 0, 1920, 1080)
+    geo = screen.availableGeometry()
+    return Rect(int(geo.x()), int(geo.y()), int(geo.x() + geo.width()), int(geo.y() + geo.height()))
+
+
 def build_app(config: Config, state_store: StateStore) -> QApplication:
     """Собирает QApplication, таймеры анимации/потребностей и показывает FlyWindow."""
     app = QApplication.instance()
@@ -45,6 +54,20 @@ def build_app(config: Config, state_store: StateStore) -> QApplication:
     if needs.mode != state.mode:
         state.mode = needs.mode
         window.set_state(_mode_to_anim(needs.mode))
+
+    if config.walk.enabled:
+        api = Win32WindowApi()
+        loco = Locomotion(
+            config.walk,
+            pet_width=config.window.width,
+            pet_height=config.window.height,
+            desktop=_desktop_rect(),
+            api=api,
+            our_hwnd_getter=lambda: int(window.winId()) if window.winId() else 0,
+        )
+        pos = window.pos()
+        loco.resume_from_desktop(float(pos.x()), float(pos.y()))
+        window.set_locomotion(loco)
 
     last_tick = time.monotonic()
     last_save = 0.0  # первый тик сохранит сразу

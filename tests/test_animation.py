@@ -31,12 +31,14 @@ def frames(qapp: QApplication) -> dict:
 
 def test_load_all_frames(frames: dict) -> None:
     total = sum(len(v) for v in frames.values())
-    assert total == 13
+    assert total == 18
     assert set(frames) == set(ANIMATION_STATES)
     assert len(frames["idle"]) == 2
     assert len(frames["walk"]) == 6
     assert len(frames["sleep"]) == 3
     assert len(frames["chew"]) == 2
+    assert len(frames["fly"]) == 4
+    assert len(frames["land"]) == 1
     for state in ANIMATION_STATES:
         assert frames[state], f"пустая группа {state}"
         for pixmap in frames[state]:
@@ -69,7 +71,17 @@ def test_set_state_switches(frames: dict) -> None:
 def test_unknown_state_raises(frames: dict) -> None:
     player = AnimationPlayer(frames, fps=8)
     with pytest.raises(AnimationError, match="Неизвестное состояние"):
-        player.set_state("fly")
+        player.set_state("dance")
+
+
+def test_fly_and_land_states(frames: dict) -> None:
+    player = AnimationPlayer(frames, fps=8)
+    player.set_state("fly")
+    assert player.state == "fly"
+    assert len(frames["fly"]) == 4
+    player.set_state("land")
+    assert player.state == "land"
+    assert len(frames["land"]) == 1
 
 
 def test_missing_assets_dir(tmp_path: Path, qapp: QApplication) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import sys
+import time
 from ctypes import wintypes
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ from fly_pet.bubble import SpeechBubble
 
 if TYPE_CHECKING:
     from fly_pet.config import Config
+    from fly_pet.locomotion import Locomotion
     from fly_pet.state import PetState, StateStore
 
 logger = logging.getLogger("fly_pet")
@@ -40,6 +42,8 @@ _MODE_TO_ANIM = {
     "walk": "walk",
     "sleep": "sleep",
     "eat": "chew",
+    "fly": "fly",
+    "land": "land",
 }
 
 
@@ -69,6 +73,10 @@ class FlyWindow(QWidget):
         self._dragging = False
         self._drag_offset = QPoint()
         self._click_through = False
+        self._facing = 1
+        self._locomotion: Locomotion | None = None
+        self._loco_timer: QTimer | None = None
+        self._loco_last_mono: float | None = None
 
         flags = Qt.WindowType.FramelessWindowHint
         if config.window.tool_window:
@@ -110,9 +118,53 @@ class FlyWindow(QWidget):
 
     def set_state(self, name: str) -> None:
         """Переключает набор кадров анимации (mode или имя анимации)."""
+        # Пока активна локомоция (не сон/еда) — кадры задаёт она.
+        if (
+            self._locomotion is not None
+            and not self._dragging
+            and name in {"idle", "walk"}
+            and self._state.mode not in {"sleep", "eat"}
+        ):
+            return
         anim = _MODE_TO_ANIM.get(name, name)
         self._player.set_state(anim)
         self._current_frame = self._player.current_frame()
+        self.update()
+
+    def set_locomotion(self, loc: Locomotion | None) -> None:
+        """Подключает локомоцию и таймер шага; None — отключить."""
+        if self._loco_timer is not None:
+            self._loco_timer.stop()
+            self._loco_timer.deleteLater()
+            self._loco_timer = None
+        self._locomotion = loc
+        self._loco_last_mono = None
+        if loc is None or not self._config.walk.enabled:
+            return
+        self._loco_timer = QTimer(self)
+        self._loco_timer.setInterval(max(1, int(self._config.walk.tick_ms)))
+        self._loco_timer.timeout.connect(self._on_locomotion_tick)
+        self._loco_timer.start()
+
+    def _on_locomotion_tick(self) -> None:
+        if self._locomotion is None or self._dragging:
+            return
+        if self._state.mode in {"sleep", "eat"}:
+            return
+
+        now = time.monotonic()
+        if self._loco_last_mono is None:
+            dt = self._config.walk.tick_ms / 1000.0
+        else:
+            dt = max(0.0, now - self._loco_last_mono)
+        self._loco_last_mono = now
+        pose = self._locomotion.step(dt)
+        self._facing = int(pose.facing)
+        self.move(int(round(pose.x)), int(round(pose.y)))
+        anim = _MODE_TO_ANIM.get(pose.anim, pose.anim)
+        self._player.set_state(anim)
+        self._current_frame = self._player.current_frame()
+        self._bubble.follow_anchor()
         self.update()
 
     def _on_tick(self) -> None:
@@ -124,13 +176,20 @@ class FlyWindow(QWidget):
         if self._current_frame is None or self._current_frame.isNull():
             return
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         x = (self.width() - self._current_frame.width()) // 2
         y = (self.height() - self._current_frame.height()) // 2
+        if self._facing < 0:
+            painter.translate(self.width(), 0)
+            painter.scale(-1, 1)
+            x = (self.width() - self._current_frame.width()) // 2
         painter.drawPixmap(x, y, self._current_frame)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
+            if self._locomotion is not None:
+                self._locomotion.pause()
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
             return
@@ -148,6 +207,10 @@ class FlyWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
             self._dragging = False
             self._persist_pose()
+            if self._locomotion is not None:
+                pos = self.pos()
+                self._locomotion.resume_from_desktop(float(pos.x()), float(pos.y()))
+                self._loco_last_mono = None
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -247,6 +310,11 @@ class FlyWindow(QWidget):
             self.setWindowState(Qt.WindowState.WindowNoState)
         if not self.isVisible():
             self.show()
+
+        # На чужом окне / в полёте не поднимаем через HWND_TOP.
+        if self._locomotion is not None and self._locomotion.blocks_desktop_reassert():
+            self._desktop_reassert_logged = False
+            return
 
         if not self._is_desktop_on_top():
             self._desktop_reassert_logged = False

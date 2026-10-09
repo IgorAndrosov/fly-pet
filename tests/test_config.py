@@ -22,6 +22,10 @@ def test_load_defaults(tmp_path: Path) -> None:
     assert cfg.needs.start["hunger"] == 40
     assert cfg.desktop.min_age_days == 7
     assert len(cfg.actions) == 4
+    assert cfg.walk.enabled is True
+    assert cfg.walk.tick_ms == 40
+    assert cfg.walk.desktop_stay_sec == (8.0, 25.0)
+    assert cfg.walk.seed is None
 
 
 def test_merge_settings_yaml(tmp_path: Path) -> None:

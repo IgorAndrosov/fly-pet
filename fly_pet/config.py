@@ -83,6 +83,16 @@ def _as_str_list(value: Any, path: str) -> list[str]:
     return result
 
 
+def _as_float_pair(value: Any, path: str) -> tuple[float, float]:
+    items = _require_list(value, path)
+    if len(items) != 2:
+        raise ConfigError(f"Ожидался список из 2 чисел в «{path}», длина: {len(items)}")
+    return (
+        _as_float(items[0], f"{path}[0]"),
+        _as_float(items[1], f"{path}[1]"),
+    )
+
+
 @dataclass(frozen=True)
 class AppConfig:
     locale: str
@@ -178,6 +188,23 @@ class PathsConfig:
 
 
 @dataclass(frozen=True)
+class WalkConfig:
+    enabled: bool
+    tick_ms: int
+    desktop_speed_px_s: float
+    window_speed_px_s: float
+    fly_speed_px_s: float
+    desktop_margin_px: int
+    desktop_stay_sec: tuple[float, float]
+    window_stay_sec: tuple[float, float]
+    pause_chance: float
+    min_window_width: int
+    min_window_height: int
+    ignore_titles: list[str]
+    seed: int | None
+
+
+@dataclass(frozen=True)
 class Config:
     app: AppConfig
     window: WindowConfig
@@ -189,6 +216,7 @@ class Config:
     desktop: DesktopConfig
     actions: list[ActionConfig]
     paths: PathsConfig
+    walk: WalkConfig
     data_dir: Path
 
     def data_path(self, name: str) -> Path:
@@ -215,6 +243,7 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
     desktop_raw = _require_dict(raw.get("desktop"), "desktop")
     actions_raw = _require_list(raw.get("actions"), "actions")
     paths_raw = _require_dict(raw.get("paths"), "paths")
+    walk_raw = _require_dict(raw.get("walk"), "walk")
 
     feeding_raw = _require_dict(window_raw.get("feeding_point"), "window.feeding_point")
     thresholds = _require_dict(needs_raw.get("thresholds"), "needs.thresholds")
@@ -349,6 +378,44 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         hermes_env=_as_str(paths_raw.get("hermes_env"), "paths.hermes_env"),
     )
 
+    seed_raw = walk_raw.get("seed")
+    if seed_raw is None:
+        walk_seed: int | None = None
+    else:
+        walk_seed = _as_int(seed_raw, "walk.seed")
+
+    walk = WalkConfig(
+        enabled=_as_bool(walk_raw.get("enabled"), "walk.enabled"),
+        tick_ms=_as_int(walk_raw.get("tick_ms"), "walk.tick_ms"),
+        desktop_speed_px_s=_as_float(
+            walk_raw.get("desktop_speed_px_s"), "walk.desktop_speed_px_s"
+        ),
+        window_speed_px_s=_as_float(
+            walk_raw.get("window_speed_px_s"), "walk.window_speed_px_s"
+        ),
+        fly_speed_px_s=_as_float(walk_raw.get("fly_speed_px_s"), "walk.fly_speed_px_s"),
+        desktop_margin_px=_as_int(
+            walk_raw.get("desktop_margin_px"), "walk.desktop_margin_px"
+        ),
+        desktop_stay_sec=_as_float_pair(
+            walk_raw.get("desktop_stay_sec"), "walk.desktop_stay_sec"
+        ),
+        window_stay_sec=_as_float_pair(
+            walk_raw.get("window_stay_sec"), "walk.window_stay_sec"
+        ),
+        pause_chance=_as_float(walk_raw.get("pause_chance"), "walk.pause_chance"),
+        min_window_width=_as_int(
+            walk_raw.get("min_window_width"), "walk.min_window_width"
+        ),
+        min_window_height=_as_int(
+            walk_raw.get("min_window_height"), "walk.min_window_height"
+        ),
+        ignore_titles=_as_str_list(
+            walk_raw.get("ignore_titles"), "walk.ignore_titles"
+        ),
+        seed=walk_seed,
+    )
+
     return Config(
         app=app,
         window=window,
@@ -360,6 +427,7 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         desktop=desktop,
         actions=actions,
         paths=paths,
+        walk=walk,
         data_dir=data_dir,
     )
 

@@ -7,8 +7,11 @@ from pathlib import Path
 
 from PyQt6.QtGui import QPixmap
 
-ANIMATION_STATES = ("idle", "walk", "sleep", "chew")
-_FRAME_RE = re.compile(r"^(?P<state>idle|walk|sleep|chew)_(?P<num>\d+)\.png$", re.IGNORECASE)
+ANIMATION_STATES = ("idle", "walk", "sleep", "chew", "fly", "land")
+_FRAME_RE = re.compile(
+    r"^(?P<state>idle|walk|sleep|chew|fly|land)_(?P<num>\d+)\.png$",
+    re.IGNORECASE,
+)
 
 
 class AnimationError(Exception):
@@ -78,6 +81,8 @@ class AnimationPlayer:
             raise AnimationError(
                 f"Неизвестное состояние анимации «{name}»; допустимы: {known}"
             )
+        if name == self._state:
+            return
         self._state = name
         self._index = 0
 
