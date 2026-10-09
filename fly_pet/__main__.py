@@ -11,14 +11,24 @@ from fly_pet import __version__
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="fly-pet",
-        description="Питомец-муха на рабочем столе. В этом шаге — только скелет, без GUI.",
+        description="Питомец-муха на рабочем столе.",
     )
     parser.add_argument(
         "--version",
         action="version",
         version=__version__,
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Запустить окно питомца (прозрачный спрайт на рабочем столе).",
+    )
+    args = parser.parse_args(argv)
+
+    if args.gui:
+        from fly_pet.app import run
+
+        return run()
 
     py = sys.version_info
     print(
