@@ -103,7 +103,7 @@ def draw_front_rubbing(d, cy: float, phase: float) -> None:
         # локти сходятся почти вплотную уже ВПЕРЕДИ головы, кончики чуть расходятся
         root = (41.0, cy + side * 3.6)
         knee = (53.5 + 0.6 * rub, cy + side * 0.7)
-        tip = (61.0 + 1.4 * rub, cy + side * 5.4)
+        tip = (61.0 + 1.4 * rub, cy + side * 2.6)
         seg(d, root, knee, 1.5)
         seg(d, knee, tip, 1.2)
         joint(d, knee, 0.8, LEG_HL)
