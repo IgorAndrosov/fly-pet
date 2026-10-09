@@ -1,7 +1,6 @@
-"""Спрайты мухи, версия 5: вид строго сверху, крылья — широкие лопасти в плоскости картинки.
+"""Спрайты мухи, версия 6: к виду сверху добавлено потирание лапок (груминг).
 
-Оси: тело горизонтально, голова справа. Крыло строится по вектору направления в плоскости экрана:
-сложенное (вдоль брюшка) ~14°, раскрытое (полёт) ~45–65°.
+Кадры: idle 2, walk 6, sleep 3, chew 2, fly 4, land 1, rub 4.
 """
 from __future__ import annotations
 
@@ -32,54 +31,37 @@ def px(v: float) -> float:
     return v * S
 
 
-def draw_wing(d: ImageDraw.ImageDraw, root: tuple[float, float], length: float, width: float,
-              spread_deg: float, side: int, alpha_mul: float = 1.0) -> None:
-    """Крыло-лопасть вдоль направления (-cos s, ∓sin s) в плоскости картинки.
-
-    side = -1 — крыло со стороны «верх экрана», +1 — снизу. spread — угол от оси тела.
-    """
+def draw_wing(d, root, length, width, spread_deg, side, alpha_mul=1.0):
     s = math.radians(spread_deg)
-    dx = -math.cos(s)
-    dy = side * math.sin(s)
-    nx, ny = -dy, dx                      # нормаль к оси крыла
+    dx, dy = -math.cos(s), side * math.sin(s)
+    nx, ny = -dy, dx
     rx, ry = px(root[0]), px(root[1])
-    L = length * S
-    W = width * S
+    L, W = length * S, width * S
     upper, lower = [], []
-    steps = 44
-    for i in range(steps + 1):
-        t = i / steps
-        # профиль ширины: узкий корень, максимум к середине, скруглённый кончик
+    for i in range(45):
+        t = i / 44
         w = W * (math.sin(math.pi * min(1.0, t * 0.86 + 0.1)) ** 0.45)
-        # лёгкий изгиб в сторону брюшка
         bend = math.sin(math.pi * t) * L * 0.05 * -side
         cx = rx + dx * L * t + nx * bend
         cy = ry + dy * L * t + ny * bend
         upper.append((cx + nx * w * 0.5, cy + ny * w * 0.5))
         lower.append((cx - nx * w * 0.5, cy - ny * w * 0.5))
-    poly = upper + lower[::-1]
-    d.polygon(poly,
+    d.polygon(upper + lower[::-1],
               fill=(WING_FILL[0], WING_FILL[1], WING_FILL[2], int(WING_FILL[3] * alpha_mul)),
               outline=(WING_EDGE[0], WING_EDGE[1], WING_EDGE[2], int(WING_EDGE[3] * alpha_mul)))
-    # прожилки
     for k in (0.45, 0.68, 0.88):
-        x0 = rx + dx * L * 0.08
-        y0 = ry + dy * L * 0.08
-        x1 = rx + dx * L * k + nx * (k - 0.5) * W * 0.22 * side
-        y1 = ry + dy * L * k + ny * (k - 0.5) * W * 0.22 * side
-        d.line([(x0, y0), (x1, y1)],
+        d.line([(rx + dx * L * 0.08, ry + dy * L * 0.08),
+                (rx + dx * L * k + nx * (k - 0.5) * W * 0.22 * side,
+                 ry + dy * L * k + ny * (k - 0.5) * W * 0.22 * side)],
                fill=(WING_VEIN[0], WING_VEIN[1], WING_VEIN[2], int(WING_VEIN[3] * alpha_mul)),
                width=int(0.5 * S))
-    # блеск по передней кромке
     hl = [(x - nx * 1.2 * S, y - ny * 1.2 * S) for x, y in upper[4:28]]
     if len(hl) > 2:
         d.line(hl, fill=(WING_HL[0], WING_HL[1], WING_HL[2], int(WING_HL[3] * alpha_mul)),
                width=int(0.7 * S))
 
 
-def draw_leg(d: ImageDraw.ImageDraw, root: tuple[float, float], out: float, back: float,
-             side: int) -> None:
-    """Лапка в плоскости экрана: наружу в сторону стороны side и назад."""
+def draw_leg(d, root, out, back, side):
     x0, y0 = px(root[0]), px(root[1])
     x1, y1 = px(root[0] - back), px(root[1] + side * out)
     x2, y2 = px(root[0] - back * 1.6), px(root[1] + side * out * 1.25)
@@ -87,18 +69,37 @@ def draw_leg(d: ImageDraw.ImageDraw, root: tuple[float, float], out: float, back
     d.line([(x1, y1), (x2, y2)], fill=LEG, width=int(1.0 * S))
 
 
+def draw_front_rubbing(d, cy, phase: float, head_dy: float) -> None:
+    """Передние лапки у лица: трутся друг о друга в противофазе (одна вперёд, другая назад)."""
+    for side in (-1, 1):
+        # противофаза: левая и правая движутся навстречу друг другу
+        rub = math.sin(phase * 2 * math.pi + (0.0 if side < 0 else math.pi))
+        root = (40.5, cy + side * 6.2)
+        knee = (44.8 + 1.6 * rub, cy + side * 4.0)
+        tip = (48.6 + 3.2 * rub, cy + side * 1.7)
+        rub_leg = (78, 80, 96, 255)
+        d.line([(px(root[0]), px(root[1])), (px(knee[0]), px(knee[1]))], fill=rub_leg,
+               width=int(1.5 * S))
+        d.line([(px(knee[0]), px(knee[1])), (px(tip[0]), px(tip[1]))], fill=rub_leg,
+               width=int(1.2 * S))
+        d.ellipse([px(tip[0] - 0.9), px(tip[1] - 0.9), px(tip[0] + 0.9), px(tip[1] + 0.9)],
+                  fill=rub_leg)
+
+
 def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float = 0.0,
-             spread_deg: float = 14.0, wing_len: float = 21.0, wing_width: float = 7.5,
+             spread_deg: float = 14.0, wing_len: float = 23.0, wing_width: float = 7.4,
              wing_alpha: float = 1.0, body_len: float = 1.0, head_dy: float = 0.0,
-             chewing: bool = False, eyes_closed: bool = False) -> Image.Image:
+             chewing: bool = False, eyes_closed: bool = False,
+             rub_phase: float | None = None) -> Image.Image:
     img = Image.new("RGBA", (SIZE * S, SIZE * S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img, "RGBA")
 
-    cy = 32 + body_dy                     # ось тела
+    cy = 32 + body_dy
 
-    # --- лапки: три пары, попеременно ---
-    # три пары: передние вынесены вперёд, задние — назад (как у насекомого)
+    # --- лапки: три пары ---
     for i, (bx, base_back) in enumerate(((27.0, -4.0), (33.0, 0.5), (39.0, 5.0))):
+        if i == 0 and rub_phase is not None:
+            continue                      # передние рисуются отдельно, в позе потирания
         swing = math.sin((legs_phase + i * 0.33) * 2 * math.pi)
         for side in (-1, 1):
             s = -swing if (i + side) % 2 == 0 else swing
@@ -110,7 +111,7 @@ def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float
     ab = 16.0 * body_len
     d.ellipse([px(30.0 - ab), px(cy - 7.6), px(30.0 + 4.0), px(cy + 7.6)], fill=ABDOMEN,
               outline=ABDOMEN_DARK, width=int(0.8 * S))
-    for k, off in enumerate((0.2, 0.42, 0.64)):
+    for off in (0.2, 0.42, 0.64):
         x = 30.0 - ab * off
         d.arc([px(x - 3.6), px(cy - 6.6), px(x + 3.6), px(cy + 6.6)],
               start=248, end=292, fill=ABDOMEN_DARK, width=int(0.9 * S))
@@ -132,17 +133,20 @@ def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float
             d.ellipse([eye[0], min(eye[1], eye[3]), eye[2], max(eye[1], eye[3])], fill=EYE)
             d.ellipse([px(hx - 1.6), px(hy + side * 5.6 - 2.4), px(hx + 0.4),
                        px(hy + side * 5.6 - 0.4)], fill=EYE_HL)
-    # хоботок
     d.line([(px(hx + 5.0), px(hy + 0.6)), (px(hx + 9.2), px(hy + 1.4))], fill=LEG,
            width=int(0.9 * S))
-
-    # --- крылья поверх корпуса: в покое лежат вдоль брюшка, в полёте разведены ---
-    for side in (-1, 1):
-        draw_wing(d, (35.0, cy + side * 3.2), wing_len, wing_width, spread_deg, side,
-                  alpha_mul=wing_alpha)
     if chewing:
         d.line([(px(hx + 6.0), px(hy + 2.6)), (px(hx + 10.0), px(hy + 3.2))],
                fill=(92, 94, 108, 255), width=int(1.0 * S))
+
+    # --- передние лапки в позе потирания (поверх груди) ---
+    if rub_phase is not None:
+        draw_front_rubbing(d, cy, rub_phase, head_dy)
+
+    # --- крылья поверх корпуса ---
+    for side in (-1, 1):
+        draw_wing(d, (35.0, cy + side * 3.2), wing_len, wing_width, spread_deg, side,
+                  alpha_mul=wing_alpha)
 
     return img.resize((SIZE, SIZE), Image.LANCZOS)
 
@@ -166,7 +170,6 @@ def frames():
         out.append((f"chew_{i + 1}", draw_fly(
             spread_deg=12.0, wing_len=21.5, wing_width=7.0, wing_alpha=0.95,
             head_dy=-0.7 + 1.4 * i, chewing=True)))
-    # полёт: крылья раскрыты в стороны
     for i, (spread, alpha, ln, wdt, dy) in enumerate((
             (42.0, 1.0, 22.0, 8.6, -0.3),
             (58.0, 1.15, 23.0, 9.2, -0.7),
@@ -178,10 +181,17 @@ def frames():
     out.append(("land_1", draw_fly(
         spread_deg=26.0, wing_len=21.0, wing_width=8.6, wing_alpha=1.1,
         leg_spread=1.2, body_dy=0.3)))
+    # потирание лапок: тело чуть приподнято, передние лапки трутся у головы
+    for i in range(4):
+        ph = i / 4.0
+        out.append((f"rub_{i + 1}", draw_fly(
+            spread_deg=15.0, wing_len=22.5, wing_width=7.2, wing_alpha=0.95,
+            leg_spread=0.95, body_dy=-0.4 + 0.3 * math.sin(ph * 2 * math.pi),
+            head_dy=-0.5, rub_phase=ph)))
     return out
 
 
-def save_gif(path: Path, images: list[Image.Image], ms: int = 120, scale: int = 4) -> None:
+def save_gif(path: Path, images, ms=120, scale=4):
     composed = []
     for im in images:
         big = im.resize((SIZE * scale, SIZE * scale), Image.NEAREST)
@@ -204,19 +214,16 @@ def main() -> None:
     for name, im in fr:
         im.save(out / f"{name}.png")
     print(f"кадров: {len(fr)}")
-    for name in ("idle", "walk", "sleep", "chew", "fly"):
+    for name in ("idle", "walk", "sleep", "chew", "fly", "rub"):
         group = [im for n, im in fr if n.startswith(name)]
-        save_gif(out / f"_{name}.gif", group, ms=320 if name == "sleep" else 110)
-    cell = SIZE * 4
-    sheet = Image.new("RGBA", (len(fr) * (cell + 6) + 6, cell + 12), (255, 255, 255, 255))
-    for y in range(sheet.height):
-        for x in range(sheet.width):
-            v = 238 if ((x // 12 + y // 12) % 2 == 0) else 214
-            sheet.putpixel((x, y), (v, v, v, 255))
-    for i, (_n, im) in enumerate(fr):
-        sheet.alpha_composite(im.resize((cell, cell), Image.NEAREST), (6 + i * (cell + 6), 6))
-    sheet.save(out / "_sheet.png")
-    print("лист:", out / "_sheet.png", sheet.size)
+        save_gif(out / f"_{name}.gif", group, ms=300 if name == "sleep" else 120)
+    cell = SIZE * 6
+    new = [f for f in fr if f[0].startswith(("rub_",))]
+    sheet = Image.new("RGBA", (len(new) * (cell + 8) + 8, cell + 16), (240, 240, 240, 255))
+    for i, (_n, im) in enumerate(new):
+        sheet.alpha_composite(im.resize((cell, cell), Image.NEAREST), (8 + i * (cell + 8), 8))
+    sheet.save(out / "_rub_preview.png")
+    print("превью потирания:", out / "_rub_preview.png", sheet.size)
 
 
 if __name__ == "__main__":
