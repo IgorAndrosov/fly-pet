@@ -7,6 +7,8 @@ window:
   height: 96
   always_on_top: false
   click_through: false
+  never_minimize: true   # окно немедленно возвращается из свёрнутого состояния
+  tool_window: true      # окно-инструмент (Qt.Tool / WS_EX_TOOLWINDOW): не в панели задач и Alt+Tab
   feeding_point: { x: null, y: null }  # null → правый нижний угол рабочей области
   title: "fly-pet"
 

@@ -7,7 +7,7 @@ import logging
 import sys
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QPoint, QRect, Qt, QTimer
+from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
 from PyQt6.QtGui import QMouseEvent, QPaintEvent, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -54,6 +54,8 @@ class FlyWindow(QWidget):
         self._click_through = False
 
         flags = Qt.WindowType.FramelessWindowHint
+        if config.window.tool_window:
+            flags |= Qt.WindowType.Tool
         if config.window.always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
@@ -117,6 +119,23 @@ class FlyWindow(QWidget):
         super().showEvent(event)
         # HWND появляется после создания нативного окна
         self.set_click_through(self._pending_click_through)
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if not self._config.window.never_minimize:
+            return
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        if not (self.windowState() & Qt.WindowState.WindowMinimized):
+            return
+        pos = self.pos()
+        QTimer.singleShot(0, lambda p=pos: self._restore_from_minimize(p))
+
+    def _restore_from_minimize(self, pos: QPoint) -> None:
+        self.setWindowState(Qt.WindowState.WindowNoState)
+        self.move(pos)
+        self.show()
+        logger.debug("окно восстановлено из свёрнутого состояния (never_minimize)")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.persist_state()

@@ -101,6 +101,8 @@ class WindowConfig:
     height: int
     always_on_top: bool
     click_through: bool
+    never_minimize: bool
+    tool_window: bool
     feeding_point: FeedingPointConfig
     title: str
 
@@ -217,6 +219,8 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         height=_as_int(window_raw.get("height"), "window.height"),
         always_on_top=_as_bool(window_raw.get("always_on_top"), "window.always_on_top"),
         click_through=_as_bool(window_raw.get("click_through"), "window.click_through"),
+        never_minimize=_as_bool(window_raw.get("never_minimize"), "window.never_minimize"),
+        tool_window=_as_bool(window_raw.get("tool_window"), "window.tool_window"),
         feeding_point=FeedingPointConfig(
             x=_as_optional_int(feeding_raw.get("x"), "window.feeding_point.x"),
             y=_as_optional_int(feeding_raw.get("y"), "window.feeding_point.y"),

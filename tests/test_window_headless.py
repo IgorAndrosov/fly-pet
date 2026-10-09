@@ -9,6 +9,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+import yaml
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QApplication
@@ -156,3 +157,37 @@ def test_out_of_bounds_pose_falls_back_to_corner(qapp: QApplication, tmp_path: P
     win = _make_window(tmp_path, {"x": -5000, "y": -5000, "facing": "left"})
     cfg = load_config(repo_root=REPO_ROOT, data_dir=tmp_path)
     assert win.pos() == _expected_corner(qapp, cfg)
+
+
+def _write_window_settings(tmp_path: Path, window: dict) -> None:
+    (tmp_path / "settings.yaml").write_text(
+        yaml.safe_dump({"window": window}, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+
+def test_never_minimize_restores(qapp: QApplication, tmp_path: Path) -> None:
+    del qapp
+    _write_window_settings(tmp_path, {"never_minimize": True})
+    win = _make_window(tmp_path, {"x": 120, "y": 140, "facing": "left"})
+    before = win.pos()
+    win.setWindowState(Qt.WindowState.WindowMinimized)
+    for _ in range(10):
+        QApplication.processEvents()
+    assert win.isMinimized() is False
+    assert win.isVisible() is True
+    assert win.pos() == before
+
+
+def test_never_minimize_off_stays_minimized(qapp: QApplication, tmp_path: Path) -> None:
+    del qapp
+    _write_window_settings(tmp_path, {"never_minimize": False})
+    win = _make_window(tmp_path, {"x": 120, "y": 140, "facing": "left"})
+    win.setWindowState(Qt.WindowState.WindowMinimized)
+    for _ in range(10):
+        QApplication.processEvents()
+    assert win.isMinimized() is True
+
+
+def test_tool_window_flag(window: FlyWindow) -> None:
+    assert window.windowFlags() & Qt.WindowType.Tool
