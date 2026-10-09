@@ -16,6 +16,8 @@ def test_load_defaults(tmp_path: Path) -> None:
     cfg = load_config(repo_root=REPO_ROOT, data_dir=tmp_path)
     assert cfg.desktop.allowed_extensions == []
     assert cfg.window.always_on_top is False
+    assert cfg.window.desktop_reassert is True
+    assert cfg.window.desktop_reassert_ms == 800
     assert cfg.safety.dry_run is True
     assert cfg.needs.start["hunger"] == 40
     assert cfg.desktop.min_age_days == 7

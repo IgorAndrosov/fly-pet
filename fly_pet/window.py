@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import sys
+from ctypes import wintypes
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
@@ -23,7 +24,16 @@ logger = logging.getLogger("fly_pet")
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
+HWND_TOP = 0
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+GA_ROOT = 2
 _MARGIN_PX = 24
+_DESKTOP_POINT_CLASSES = frozenset(
+    {"Progman", "WorkerW", "SHELLDLL_DefView", "SysListView32"}
+)
+_DESKTOP_FOREGROUND_CLASSES = frozenset({"Progman", "WorkerW"})
 
 _MODE_TO_ANIM = {
     "idle": "idle",
@@ -82,6 +92,15 @@ class FlyWindow(QWidget):
         self._timer.start()
 
         self._pending_click_through = bool(config.window.click_through)
+        self._desktop_reassert_logged = False
+        self._desktop_reassert_timer: QTimer | None = None
+        if config.window.desktop_reassert:
+            self._desktop_reassert_timer = QTimer(self)
+            self._desktop_reassert_timer.setInterval(
+                max(1, int(config.window.desktop_reassert_ms))
+            )
+            self._desktop_reassert_timer.timeout.connect(self._on_desktop_reassert)
+            self._desktop_reassert_timer.start()
 
     def say(self, text: str, ttl_ms: int | None = None) -> None:
         """Показать реплику в облачке рядом с питомцем."""
@@ -221,3 +240,95 @@ class FlyWindow(QWidget):
         else:
             style &= ~WS_EX_TRANSPARENT
         set_long(hwnd, GWL_EXSTYLE, style)
+
+    def _on_desktop_reassert(self) -> None:
+        """Тик сторожа: восстановить видимость и поднять окно над рабочим столом."""
+        if self.isMinimized():
+            self.setWindowState(Qt.WindowState.WindowNoState)
+        if not self.isVisible():
+            self.show()
+
+        if not self._is_desktop_on_top():
+            self._desktop_reassert_logged = False
+            return
+
+        self._raise_without_activate()
+        if not self._desktop_reassert_logged:
+            logger.debug("окно возвращено поверх рабочего стола (desktop_reassert)")
+            self._desktop_reassert_logged = True
+
+    def _probe_point(self) -> QPoint:
+        """Центр окна; если вне экрана — ближайшая внутренняя точка."""
+        center = self.frameGeometry().center()
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return center
+        geo = screen.geometry()
+        x = max(geo.left(), min(center.x(), geo.right()))
+        y = max(geo.top(), min(center.y(), geo.bottom()))
+        return QPoint(x, y)
+
+    @staticmethod
+    def _window_class_name(hwnd: int) -> str:
+        if not hwnd:
+            return ""
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+        return buf.value
+
+    def _is_our_hwnd(self, hwnd: int, our_hwnd: int) -> bool:
+        if not hwnd or not our_hwnd:
+            return False
+        if hwnd == our_hwnd:
+            return True
+        root = int(ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT) or 0)
+        return root == our_hwnd
+
+    def _is_desktop_on_top(self) -> bool:
+        """True, если поверх питомца лежит рабочий стол (не обычное окно)."""
+        if sys.platform != "win32":
+            logger.warning(
+                "desktop_reassert недоступен на платформе %s — пропуск",
+                sys.platform,
+            )
+            return False
+
+        our_hwnd = int(self.winId())
+        if our_hwnd == 0:
+            return False
+
+        user32 = ctypes.windll.user32
+        point = self._probe_point()
+        at_point = int(user32.WindowFromPoint(wintypes.POINT(point.x(), point.y())) or 0)
+        at_class = self._window_class_name(at_point)
+        if (
+            at_point
+            and not self._is_our_hwnd(at_point, our_hwnd)
+            and at_class in _DESKTOP_POINT_CLASSES
+        ):
+            return True
+
+        fg = int(user32.GetForegroundWindow() or 0)
+        fg_class = self._window_class_name(fg)
+        return fg_class in _DESKTOP_FOREGROUND_CLASSES
+
+    def _raise_without_activate(self) -> None:
+        """Поднять окно наверх без активации (Win32 SetWindowPos)."""
+        if sys.platform != "win32":
+            logger.warning(
+                "desktop_reassert/_raise недоступен на платформе %s — пропуск",
+                sys.platform,
+            )
+            return
+        hwnd = int(self.winId())
+        if hwnd == 0:
+            return
+        ctypes.windll.user32.SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )

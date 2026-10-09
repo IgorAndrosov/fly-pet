@@ -103,6 +103,8 @@ class WindowConfig:
     click_through: bool
     never_minimize: bool
     tool_window: bool
+    desktop_reassert: bool
+    desktop_reassert_ms: int
     feeding_point: FeedingPointConfig
     title: str
 
@@ -236,6 +238,12 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         click_through=_as_bool(window_raw.get("click_through"), "window.click_through"),
         never_minimize=_as_bool(window_raw.get("never_minimize"), "window.never_minimize"),
         tool_window=_as_bool(window_raw.get("tool_window"), "window.tool_window"),
+        desktop_reassert=_as_bool(
+            window_raw.get("desktop_reassert"), "window.desktop_reassert"
+        ),
+        desktop_reassert_ms=_as_int(
+            window_raw.get("desktop_reassert_ms"), "window.desktop_reassert_ms"
+        ),
         feeding_point=FeedingPointConfig(
             x=_as_optional_int(feeding_raw.get("x"), "window.feeding_point.x"),
             y=_as_optional_int(feeding_raw.get("y"), "window.feeding_point.y"),

@@ -9,6 +9,8 @@ window:
   click_through: false
   never_minimize: true   # окно немедленно возвращается из свёрнутого состояния
   tool_window: true      # окно-инструмент (Qt.Tool / WS_EX_TOOLWINDOW): не в панели задач и Alt+Tab
+  desktop_reassert: true       # сторож: после «Показать рабочий стол» вернуть муху наверх
+  desktop_reassert_ms: 800     # период проверки сторожа, миллисекунды
   feeding_point: { x: null, y: null }  # null → правый нижний угол рабочей области
   title: "fly-pet"
 

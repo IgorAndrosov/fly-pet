@@ -181,7 +181,8 @@ def test_never_minimize_restores(qapp: QApplication, tmp_path: Path) -> None:
 
 def test_never_minimize_off_stays_minimized(qapp: QApplication, tmp_path: Path) -> None:
     del qapp
-    _write_window_settings(tmp_path, {"never_minimize": False})
+    # desktop_reassert тоже разворачивает — для этого теста его выключаем
+    _write_window_settings(tmp_path, {"never_minimize": False, "desktop_reassert": False})
     win = _make_window(tmp_path, {"x": 120, "y": 140, "facing": "left"})
     win.setWindowState(Qt.WindowState.WindowMinimized)
     for _ in range(10):
@@ -191,3 +192,61 @@ def test_never_minimize_off_stays_minimized(qapp: QApplication, tmp_path: Path) 
 
 def test_tool_window_flag(window: FlyWindow) -> None:
     assert window.windowFlags() & Qt.WindowType.Tool
+
+
+def test_desktop_reassert_timer_on(qapp: QApplication, tmp_path: Path) -> None:
+    del qapp
+    _write_window_settings(tmp_path, {"desktop_reassert": True, "desktop_reassert_ms": 500})
+    win = _make_window(tmp_path)
+    assert win._desktop_reassert_timer is not None
+    assert win._desktop_reassert_timer.isActive()
+    assert win._desktop_reassert_timer.interval() == 500
+
+
+def test_desktop_reassert_timer_off(qapp: QApplication, tmp_path: Path) -> None:
+    del qapp
+    _write_window_settings(tmp_path, {"desktop_reassert": False})
+    win = _make_window(tmp_path)
+    assert win._desktop_reassert_timer is None or not win._desktop_reassert_timer.isActive()
+
+
+def test_desktop_reassert_raises_when_desktop_on_top(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del qapp
+    _write_window_settings(tmp_path, {"desktop_reassert": True})
+    win = _make_window(tmp_path)
+    calls: list[int] = []
+    monkeypatch.setattr(win, "_is_desktop_on_top", lambda: True)
+    monkeypatch.setattr(win, "_raise_without_activate", lambda: calls.append(1))
+    win._on_desktop_reassert()
+    assert calls == [1]
+
+
+def test_desktop_reassert_no_raise_when_not_desktop(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del qapp
+    _write_window_settings(tmp_path, {"desktop_reassert": True})
+    win = _make_window(tmp_path)
+    calls: list[int] = []
+    monkeypatch.setattr(win, "_is_desktop_on_top", lambda: False)
+    monkeypatch.setattr(win, "_raise_without_activate", lambda: calls.append(1))
+    win._on_desktop_reassert()
+    assert calls == []
+
+
+def test_desktop_reassert_restores_minimized(qapp: QApplication, tmp_path: Path) -> None:
+    del qapp
+    _write_window_settings(
+        tmp_path,
+        {"desktop_reassert": True, "never_minimize": False},
+    )
+    win = _make_window(tmp_path, {"x": 120, "y": 140, "facing": "left"})
+    win.setWindowState(Qt.WindowState.WindowMinimized)
+    QApplication.processEvents()
+    assert win.isMinimized() is True
+    win._on_desktop_reassert()
+    QApplication.processEvents()
+    assert win.isMinimized() is False
+    assert win.isVisible() is True
