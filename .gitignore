@@ -1,0 +1,15 @@
+# Виртуальное окружение проекта
+.venv/
+
+# Данные питомца (state, логи, корзина, локальные настройки) — не в git
+_data/
+
+# Секрет (API-ключ и прочее) — не в git
+.env
+
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
