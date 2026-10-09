@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import math
 import random
 import sys
 from dataclasses import dataclass
@@ -114,6 +115,22 @@ class LocomotionState(Enum):
     IN_FLIGHT = "in_flight"
     LANDING = "landing"
     ON_WINDOW = "on_window"
+
+
+class LocomotionMode(Enum):
+    """Режим поверхности: стол (2D) или полоса окна (1D). Меняется только на посадке."""
+
+    DESKTOP = "desktop"
+    WINDOW = "window"
+
+
+def _norm_angle_deg(deg: float) -> float:
+    """Нормализовать угол в (−180, 180]."""
+    return (float(deg) + 180.0) % 360.0 - 180.0
+
+
+def _heading_to_facing(heading_deg: float) -> int:
+    return 1 if abs(_norm_angle_deg(heading_deg)) <= 90.0 else -1
 
 
 @dataclass(frozen=True)
@@ -534,9 +551,11 @@ class Locomotion(LocomotionDriver):
         self._our_hwnd_getter = our_hwnd_getter or (lambda: 0)
         seed = getattr(walk_cfg, "seed", None)
         self._rng = rng if rng is not None else random.Random(seed)
+        self._mode = LocomotionMode.DESKTOP
         self._state = LocomotionState.ON_DESKTOP
         self._x = float(desktop.left + max(0, (desktop.width - pet_width) // 2))
         self._y = self._desktop_y()
+        self._heading_deg = 0.0
         self._facing = 1
         self._vx = 0.0
         self._paused = False
@@ -553,6 +572,7 @@ class Locomotion(LocomotionDriver):
         self._flight_target_hwnd: int | None = None
         self._flight_to_desktop = False
         self._attached_hwnd: int | None = None
+        self._prev_window_hwnd: int | None = None
         self._window_offset_x = 0.0
         self._anim = "walk"
         self._attach_attempts = 0
@@ -566,11 +586,29 @@ class Locomotion(LocomotionDriver):
         self._last_burst_was_long = False
         self._last_pause_groomed = False
         self._last_pause_turned = False
+        self._last_pause_turn_delta = 0.0
         self._begin_burst()
 
     @property
     def state(self) -> LocomotionState:
         return self._state
+
+    @property
+    def mode(self) -> LocomotionMode:
+        return self._mode
+
+    def sprite_angle_deg(self) -> float:
+        """Угол спрайта: 0 = вправо; в полёте — к цели."""
+        if self._state in {
+            LocomotionState.TAKEOFF,
+            LocomotionState.IN_FLIGHT,
+            LocomotionState.LANDING,
+        }:
+            dx = self._flight_x1 - self._x
+            dy = self._flight_y1 - self._y
+            if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                return _norm_angle_deg(math.degrees(math.atan2(dy, dx)))
+        return _norm_angle_deg(self._heading_deg)
 
     @property
     def pose(self) -> LocomotionPose:
@@ -593,9 +631,10 @@ class Locomotion(LocomotionDriver):
     def resume_from_desktop(self, x: float, y: float) -> None:
         """После перетаскивания человеком — снова с рабочего стола."""
         self._paused = False
-        self._x = float(x)
-        self._y = self._desktop_y()
+        self._mode = LocomotionMode.DESKTOP
+        self._x, self._y = self._clamp_desktop_xy(float(x), float(y))
         self._attached_hwnd = None
+        self._prev_window_hwnd = None
         self._flight_target_hwnd = None
         self._flight_to_desktop = False
         self._attach_verify_left = None
@@ -630,8 +669,27 @@ class Locomotion(LocomotionDriver):
         return self.pose
 
     def _desktop_y(self) -> float:
+        _, _, _, y_hi = self._desktop_walk_bounds()
+        return float(y_hi)
+
+    def _desktop_walk_bounds(self) -> tuple[float, float, float, float]:
+        """Границы top-left спрайта при ходьбе по столу (с desktop_margin_px)."""
         margin = float(getattr(self._cfg, "desktop_margin_px", 12))
-        return float(self._desktop.bottom - margin - self._pet_h)
+        x_lo = float(self._desktop.left) + margin
+        x_hi = float(self._desktop.right) - margin - float(self._pet_w)
+        y_lo = float(self._desktop.top) + margin
+        y_hi = float(self._desktop.bottom) - margin - float(self._pet_h)
+        if x_hi < x_lo:
+            x_lo = float(self._desktop.left)
+            x_hi = float(self._desktop.right - self._pet_w)
+        if y_hi < y_lo:
+            y_lo = float(self._desktop.top)
+            y_hi = float(self._desktop.bottom - self._pet_h)
+        return x_lo, x_hi, y_lo, y_hi
+
+    def _clamp_desktop_xy(self, x: float, y: float) -> tuple[float, float]:
+        x_lo, x_hi, y_lo, y_hi = self._desktop_walk_bounds()
+        return max(x_lo, min(x_hi, x)), max(y_lo, min(y_hi, y))
 
     def _roll_stay(self, pair: Sequence[float]) -> float:
         lo, hi = float(pair[0]), float(pair[1])
@@ -643,11 +701,10 @@ class Locomotion(LocomotionDriver):
         return self._roll_stay(pair)
 
     def _clamp_desktop_x(self, x: float) -> float:
-        lo = float(self._desktop.left)
-        hi = float(self._desktop.right - self._pet_w)
-        if hi < lo:
-            return lo
-        return max(lo, min(hi, x))
+        x_lo, x_hi, _, _ = self._desktop_walk_bounds()
+        if x_hi < x_lo:
+            return x_lo
+        return max(x_lo, min(x_hi, x))
 
     def _roll_burst_distance(self) -> tuple[float, bool]:
         """Длина следующего рывка и флаг «длинный»."""
@@ -659,6 +716,9 @@ class Locomotion(LocomotionDriver):
             pair = getattr(self._cfg, "burst_px", (28.0, 120.0))
         return self._roll_pair(pair), is_long
 
+    def _sync_facing_from_heading(self) -> None:
+        self._facing = _heading_to_facing(self._heading_deg)
+
     def _begin_burst(self) -> None:
         dist, is_long = self._roll_burst_distance()
         speed = abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
@@ -668,13 +728,33 @@ class Locomotion(LocomotionDriver):
         self._pause_left = 0.0
         self._walk_phase = "burst"
         self._anim = "walk"
-        self._vx = speed * (1 if self._facing >= 0 else -1)
+        if self._mode == LocomotionMode.WINDOW:
+            if abs(_norm_angle_deg(self._heading_deg)) > 90.0:
+                self._heading_deg = 180.0
+            else:
+                self._heading_deg = 0.0
+            self._sync_facing_from_heading()
+            self._vx = speed * (1 if self._facing >= 0 else -1)
+        else:
+            self._sync_facing_from_heading()
+            self._vx = speed
 
     def _begin_pause(self) -> None:
         turn_chance = float(getattr(self._cfg, "turn_on_pause_chance", 0.35))
         turned = self._rng.random() < turn_chance
+        self._last_pause_turn_delta = 0.0
         if turned:
-            self._facing = -1 if self._facing >= 0 else 1
+            if self._mode == LocomotionMode.WINDOW:
+                self._heading_deg = 180.0 if self._heading_deg == 0.0 else 0.0
+                self._last_pause_turn_delta = 180.0
+            else:
+                pair = getattr(self._cfg, "desktop_turn_deg", (20.0, 90.0))
+                delta = self._roll_pair(pair)
+                if self._rng.random() < 0.5:
+                    delta = -delta
+                self._heading_deg = _norm_angle_deg(self._heading_deg + delta)
+                self._last_pause_turn_delta = delta
+            self._sync_facing_from_heading()
         self._last_pause_turned = turned
 
         groom_chance = float(getattr(self._cfg, "groom_chance", 0.45))
@@ -715,8 +795,41 @@ class Locomotion(LocomotionDriver):
                 break
         return max(lo, min(hi, new_x)), facing
 
+    def _bounce_step_2d(
+        self, x: float, y: float, dx: float, dy: float
+    ) -> tuple[float, float]:
+        """Сдвиг в 2D с зеркальным отражением угла от краёв."""
+        x_lo, x_hi, y_lo, y_hi = self._desktop_walk_bounds()
+        if x_hi < x_lo or y_hi < y_lo:
+            return x_lo, y_lo
+        nx, ny = x + dx, y + dy
+        heading = self._heading_deg
+        for _ in range(8):
+            bounced = False
+            if nx < x_lo:
+                nx = x_lo + (x_lo - nx)
+                heading = _norm_angle_deg(180.0 - heading)
+                bounced = True
+            elif nx > x_hi:
+                nx = x_hi - (nx - x_hi)
+                heading = _norm_angle_deg(180.0 - heading)
+                bounced = True
+            if ny < y_lo:
+                ny = y_lo + (y_lo - ny)
+                heading = _norm_angle_deg(-heading)
+                bounced = True
+            elif ny > y_hi:
+                ny = y_hi - (ny - y_hi)
+                heading = _norm_angle_deg(-heading)
+                bounced = True
+            if not bounced:
+                break
+        self._heading_deg = heading
+        self._sync_facing_from_heading()
+        return max(x_lo, min(x_hi, nx)), max(y_lo, min(y_hi, ny))
+
     def _advance_burst_x(self, cur_x: float, dt: float, lo: float, hi: float) -> float:
-        """Сдвинуть X на один тик рывка; вернуть новую координату."""
+        """Сдвинуть X на один тик рывка (режим окна); вернуть новую координату."""
         self._anim = "walk"
         speed = abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
         if abs(self._vx) < 1e-9:
@@ -728,6 +841,7 @@ class Locomotion(LocomotionDriver):
         signed = step if self._vx >= 0 else -step
         new_x, facing = self._bounce_step(cur_x, signed, lo, hi)
         self._facing = facing
+        self._heading_deg = 0.0 if facing >= 0 else 180.0
         self._vx = speed * (1 if facing >= 0 else -1)
         if hi > lo:
             self._burst_left = max(0.0, self._burst_left - step)
@@ -737,8 +851,24 @@ class Locomotion(LocomotionDriver):
             self._begin_pause()
         return new_x
 
+    def _advance_burst_desktop(self, dt: float) -> None:
+        """Рывок по столу в направлении heading с отражением от краёв."""
+        self._anim = "walk"
+        speed = abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
+        step = min(speed * dt, max(0.0, self._burst_left))
+        if step <= 0:
+            self._begin_pause()
+            return
+        rad = math.radians(self._heading_deg)
+        dx = step * math.cos(rad)
+        dy = step * math.sin(rad)
+        self._x, self._y = self._bounce_step_2d(self._x, self._y, dx, dy)
+        self._burst_left = max(0.0, self._burst_left - step)
+        if self._burst_left <= 1e-6:
+            self._begin_pause()
+
     def _tick_walk_or_pause(self, dt: float, cur_x: float, lo: float, hi: float) -> float:
-        """Тик прерывистой ходьбы; возвращает новый x (в паузе — без изменений)."""
+        """Тик прерывистой ходьбы по линии (окно); возвращает новый x."""
         if self._walk_phase == "pause":
             self._pause_left -= dt
             if self._pause_left <= 0:
@@ -746,20 +876,54 @@ class Locomotion(LocomotionDriver):
             return cur_x
         return self._advance_burst_x(cur_x, dt, lo, hi)
 
+    def _tick_walk_desktop(self, dt: float) -> None:
+        if self._walk_phase == "pause":
+            self._pause_left -= dt
+            if self._pause_left <= 0:
+                self._begin_burst()
+            return
+        self._advance_burst_desktop(dt)
+
     def _step_desktop(self, dt: float) -> None:
-        self._y = self._desktop_y()
-        lo = float(self._desktop.left)
-        hi = float(self._desktop.right - self._pet_w)
-        self._x = self._tick_walk_or_pause(dt, self._x, lo, hi)
+        self._tick_walk_desktop(dt)
+        self._x, self._y = self._clamp_desktop_xy(self._x, self._y)
 
         self._stay_left -= dt
         if self._stay_left <= 0:
-            self._begin_takeoff(to_window=True)
+            self._begin_takeoff()
 
     def _max_attach_attempts(self) -> int:
         return int(getattr(self._cfg, "max_attach_attempts", 3))
 
-    def _begin_takeoff(self, *, to_window: bool) -> None:
+    def _choose_flight_kind(self) -> str:
+        """Решение взлёта: «to_window» или «to_desktop»."""
+        if self._mode == LocomotionMode.DESKTOP:
+            chance = float(getattr(self._cfg, "fly_to_window_chance", 0.5))
+            return "to_window" if self._rng.random() < chance else "to_desktop"
+        chance = float(getattr(self._cfg, "leave_to_desktop_chance", 0.5))
+        return "to_desktop" if self._rng.random() < chance else "to_window"
+
+    def _pick_desktop_fly_point(self) -> tuple[float, float]:
+        margin = float(getattr(self._cfg, "desktop_fly_margin_px", 80))
+        x_lo = float(self._desktop.left) + margin
+        x_hi = float(self._desktop.right) - margin - float(self._pet_w)
+        y_lo = float(self._desktop.top) + margin
+        y_hi = float(self._desktop.bottom) - margin - float(self._pet_h)
+        if x_hi < x_lo or y_hi < y_lo:
+            return self._clamp_desktop_xy(self._x, self._y)
+        return (
+            float(self._rng.uniform(x_lo, x_hi)),
+            float(self._rng.uniform(y_lo, y_hi)),
+        )
+
+    def _begin_takeoff(self, *, to_window: bool | None = None) -> None:
+        """Старт перелёта. to_window=None — решить по режиму и шансам из конфига."""
+        self._prev_window_hwnd = self._attached_hwnd
+        kind = (
+            ("to_window" if to_window else "to_desktop")
+            if to_window is not None
+            else self._choose_flight_kind()
+        )
         self._state = LocomotionState.TAKEOFF
         self._anim = "fly"
         self._phase_t = 0.0
@@ -767,42 +931,41 @@ class Locomotion(LocomotionDriver):
         self._attached_hwnd = None
         self._attach_verify_left = None
         target_hwnd: int | None = None
-        tx, ty = self._x, self._desktop_y()
-        if to_window:
+        tx, ty = self._x, self._y
+
+        if kind == "to_window":
             if self._attach_attempts >= self._max_attach_attempts():
-                # Лимит неудачных посадок — только ходьба по столу
-                self._state = LocomotionState.ON_DESKTOP
-                self._attach_attempts = 0
-                self._failed_attach_hwnds.clear()
-                self._stay_left = self._roll_stay(
-                    getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
-                )
-                self._begin_burst()
-                our = self._our_hwnd_getter()
-                if our:
-                    self._api.detach_to_desktop(our)
+                self._land_stay_on_desktop()
                 return
-            pick = self._pick_window_target()
+            exclude = set(self._failed_attach_hwnds)
+            if self._prev_window_hwnd is not None:
+                exclude.add(self._prev_window_hwnd)
+            pick = self._pick_window_target(exclude_hwnds=exclude)
+            if pick is None and self._prev_window_hwnd is not None:
+                # Единственное окно — допускаем то же, если других нет
+                pick = self._pick_window_target(
+                    exclude_hwnds=set(self._failed_attach_hwnds)
+                )
             if pick is not None:
                 target_hwnd, tx, ty = pick
                 self._attach_attempts += 1
             else:
-                # Некуда лететь — остаёмся на столе
-                self._state = LocomotionState.ON_DESKTOP
-                self._attach_attempts = 0
-                self._failed_attach_hwnds.clear()
-                self._stay_left = self._roll_stay(
-                    getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
-                )
-                self._begin_burst()
-                return
-            self._flight_to_desktop = False
+                if self._mode == LocomotionMode.DESKTOP:
+                    # Некуда лететь — остаёмся на столе
+                    self._land_stay_on_desktop()
+                    return
+                tx, ty = self._pick_desktop_fly_point()
+                kind = "to_desktop"
+            self._flight_to_desktop = kind == "to_desktop"
         else:
-            tx = self._clamp_desktop_x(self._x)
-            ty = self._desktop_y()
+            tx, ty = self._pick_desktop_fly_point()
             self._flight_to_desktop = True
             self._attach_attempts = 0
             self._failed_attach_hwnds.clear()
+
+        if self._flight_to_desktop:
+            target_hwnd = None
+
         self._flight_target_hwnd = target_hwnd
         self._flight_x0 = self._x
         self._flight_y0 = self._y
@@ -811,22 +974,43 @@ class Locomotion(LocomotionDriver):
         dist = ((tx - self._x) ** 2 + (ty - self._y) ** 2) ** 0.5
         speed = max(1.0, float(getattr(self._cfg, "fly_speed_px_s", 520)))
         self._flight_dur = max(0.05, dist / speed)
-        if tx != self._x:
-            self._facing = 1 if tx > self._x else -1
+        self._heading_deg = _norm_angle_deg(
+            math.degrees(math.atan2(ty - self._y, tx - self._x))
+        )
+        self._sync_facing_from_heading()
         our = self._our_hwnd_getter()
-        if our and to_window is False:
+        if our and self._flight_to_desktop:
             self._api.detach_to_desktop(our)
 
-    def _pick_window_target(self) -> tuple[int, float, float] | None:
+    def _land_stay_on_desktop(self) -> None:
+        self._mode = LocomotionMode.DESKTOP
+        self._state = LocomotionState.ON_DESKTOP
+        self._attach_attempts = 0
+        self._failed_attach_hwnds.clear()
+        self._x, self._y = self._clamp_desktop_xy(self._x, self._y)
+        self._stay_left = self._roll_stay(
+            getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
+        )
+        self._begin_burst()
+        our = self._our_hwnd_getter()
+        if our:
+            self._api.detach_to_desktop(our)
+
+    def _pick_window_target(
+        self, *, exclude_hwnds: set[int] | None = None
+    ) -> tuple[int, float, float] | None:
         our = self._our_hwnd_getter()
         raw = self._api.list_windows()
+        excluded = set(self._failed_attach_hwnds)
+        if exclude_hwnds:
+            excluded |= set(exclude_hwnds)
         cands = filter_window_candidates(
             raw,
             min_width=int(getattr(self._cfg, "min_window_width", 320)),
             min_height=int(getattr(self._cfg, "min_window_height", 160)),
             ignore_titles=list(getattr(self._cfg, "ignore_titles", [])),
             our_hwnd=our or None,
-            exclude_hwnds=list(self._failed_attach_hwnds),
+            exclude_hwnds=list(excluded),
         )
         usable: list[tuple[WindowInfo, Rect]] = []
         for info in cands:
@@ -861,8 +1045,11 @@ class Locomotion(LocomotionDriver):
         t = min(1.0, self._phase_t / dur)
         self._x = self._flight_x0 + (self._flight_x1 - self._flight_x0) * t
         self._y = self._flight_y0 + (self._flight_y1 - self._flight_y0) * t
-        if self._flight_x1 != self._flight_x0:
-            self._facing = 1 if self._flight_x1 > self._flight_x0 else -1
+        dx = self._flight_x1 - self._flight_x0
+        dy = self._flight_y1 - self._flight_y0
+        if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+            self._heading_deg = _norm_angle_deg(math.degrees(math.atan2(dy, dx)))
+            self._sync_facing_from_heading()
         if t >= 1.0:
             self._x = self._flight_x1
             self._y = self._flight_y1
@@ -907,8 +1094,10 @@ class Locomotion(LocomotionDriver):
                 self._api.attach_above(our, self._attached_hwnd)
         if self._phase_t >= _LANDING_SEC:
             if self._attached_hwnd is None:
+                # Смена режима — только здесь, на посадке
+                self._mode = LocomotionMode.DESKTOP
                 self._state = LocomotionState.ON_DESKTOP
-                self._y = self._desktop_y()
+                self._x, self._y = self._clamp_desktop_xy(self._x, self._y)
                 self._attach_attempts = 0
                 self._failed_attach_hwnds.clear()
                 self._stay_left = self._roll_stay(
@@ -916,7 +1105,9 @@ class Locomotion(LocomotionDriver):
                 )
                 self._begin_burst()
             else:
+                self._mode = LocomotionMode.WINDOW
                 self._state = LocomotionState.ON_WINDOW
+                self._heading_deg = 0.0 if self._facing >= 0 else 180.0
                 self._attach_verify_left = _ATTACH_VERIFY_TICKS
                 self._stay_left = self._roll_stay(
                     getattr(self._cfg, "window_stay_sec", (6.0, 18.0))
@@ -959,11 +1150,9 @@ class Locomotion(LocomotionDriver):
 
         self._stay_left -= dt
         if self._stay_left <= 0:
-            # Улететь на стол или на другое окно
             self._attach_attempts = 0
             self._failed_attach_hwnds.clear()
-            go_desktop = self._rng.random() < 0.45
-            self._begin_takeoff(to_window=not go_desktop)
+            self._begin_takeoff()
 
     def _verify_attach_visible(self) -> bool:
         """True, если мы над целью в z-порядке; иначе откат на стол/другое окно.
@@ -1003,9 +1192,8 @@ class Locomotion(LocomotionDriver):
         self._attached_hwnd = None
         self._attach_verify_left = None
         self._api.detach_to_desktop(our)
-        # На стол, затем снова выбрать другое окно (с учётом лимита попыток)
-        self._y = self._desktop_y()
-        self._x = self._clamp_desktop_x(self._x)
+        # Режим ещё WINDOW до посадки; сразу пробуем другое окно
+        self._x, self._y = self._clamp_desktop_xy(self._x, self._y)
         self._begin_takeoff(to_window=True)
         return False
 

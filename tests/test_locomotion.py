@@ -9,14 +9,13 @@ import pytest
 
 from fly_pet.locomotion import (
     Locomotion,
+    LocomotionMode,
     LocomotionState,
     Rect,
     WindowInfo,
     filter_window_candidates,
     title_bar_strip_from_metrics,
 )
-
-
 @dataclass
 class FakeWalk:
     enabled: bool = True
@@ -32,6 +31,10 @@ class FakeWalk:
     long_burst_chance: float = 0.0
     long_burst_px: tuple[float, float] = (200.0, 200.0)
     turn_on_pause_chance: float = 0.0
+    fly_to_window_chance: float = 0.5
+    leave_to_desktop_chance: float = 0.5
+    desktop_turn_deg: tuple[float, float] = (20.0, 90.0)
+    desktop_fly_margin_px: int = 80
     fly_speed_px_s: float = 500.0
     desktop_margin_px: int = 10
     desktop_stay_sec: tuple[float, float] = (1000.0, 1000.0)
@@ -157,7 +160,13 @@ def _make_loco(
 
 
 def test_filter_empty_stays_desktop() -> None:
-    loco, api, cfg = _make_loco(cfg=FakeWalk(desktop_stay_sec=(0.01, 0.01), seed=7))
+    loco, api, cfg = _make_loco(
+        cfg=FakeWalk(
+            desktop_stay_sec=(0.01, 0.01),
+            fly_to_window_chance=1.0,
+            seed=7,
+        )
+    )
     api.windows = []
     # Дождаться взлёта: пустой список → остаёмся на столе
     for _ in range(5):
@@ -254,28 +263,30 @@ def test_desktop_burst_distance_and_bounce() -> None:
             burst_px=(100.0, 100.0),
             burst_speed_px_s=100.0,
             pause_sec=(10.0, 10.0),  # длинная пауза после рывка
+            desktop_margin_px=0,
             seed=1,
         ),
         desktop=Rect(0, 0, 500, 400),
         pet_w=50,
         pet_h=50,
     )
-    loco.resume_from_desktop(0.0, 0.0)
-    loco._facing = 1
+    loco.resume_from_desktop(0.0, 100.0)
+    loco._heading_deg = 0.0
     loco._begin_burst()
     x0 = loco.pose.x
+    y0 = loco.pose.y
     for _ in range(10):
-        loco.step(0.1)  # 10 * 10px = 100px рывок
+        loco.step(0.1)  # 10 * 10px = 100px рывок вправо
     assert loco.pose.x == pytest.approx(x0 + 100.0, abs=0.5)
+    assert loco.pose.y == pytest.approx(y0, abs=0.5)
     assert loco._walk_phase == "pause"
 
     # Упираемся в правый край и отражаемся во время рывка
     loco._x = 450.0  # max = 500-50=450
-    loco._facing = 1
+    loco._heading_deg = 0.0
     loco._begin_burst()
     loco._burst_left = 50.0
     loco.step(0.1)
-    assert loco._vx < 0
     assert loco.pose.facing == -1
     assert loco.pose.x <= 450.0
 
@@ -333,6 +344,7 @@ def test_on_window_follows_target_move() -> None:
         cfg=FakeWalk(window_stay_sec=(1000, 1000), seed=3),
         api=api,
     )
+    loco._mode = LocomotionMode.WINDOW
     loco._state = LocomotionState.ON_WINDOW
     loco._attached_hwnd = 10
     loco._window_offset_x = 40.0
@@ -357,6 +369,7 @@ def test_missing_window_triggers_takeoff() -> None:
     )
     api = FakeApi([win])
     loco, _, _ = _make_loco(api=api, cfg=FakeWalk(seed=4))
+    loco._mode = LocomotionMode.WINDOW
     loco._state = LocomotionState.ON_WINDOW
     loco._attached_hwnd = 10
     loco._window_offset_x = 10.0
@@ -418,6 +431,7 @@ def test_failed_attach_detaches_and_retries() -> None:
         ),
         api=api,
     )
+    loco._mode = LocomotionMode.WINDOW
     loco._state = LocomotionState.ON_WINDOW
     loco._attached_hwnd = 10
     loco._window_offset_x = 10.0
@@ -452,6 +466,7 @@ def test_max_attach_attempts_stays_on_desktop() -> None:
         ),
         api=api,
     )
+    loco._mode = LocomotionMode.WINDOW
     loco._state = LocomotionState.ON_WINDOW
     loco._attached_hwnd = 10
     loco._window_offset_x = 10.0
@@ -461,6 +476,7 @@ def test_max_attach_attempts_stays_on_desktop() -> None:
     loco._sync_to_window()
     loco.step(0.05)
     assert loco.state == LocomotionState.ON_DESKTOP
+    assert loco.mode == LocomotionMode.DESKTOP
     assert loco._attached_hwnd is None
 
 
@@ -473,6 +489,7 @@ def test_successful_attach_verify_clears_attempts() -> None:
         cfg=FakeWalk(window_stay_sec=(1000, 1000), seed=8),
         api=api,
     )
+    loco._mode = LocomotionMode.WINDOW
     loco._state = LocomotionState.ON_WINDOW
     loco._attached_hwnd = 10
     loco._window_offset_x = 10.0
@@ -557,10 +574,12 @@ def test_groom_and_turn_rates() -> None:
         seed=99,
     )
     loco, _, _ = _make_loco(cfg=cfg, seed=99)
+    loco._mode = LocomotionMode.WINDOW
     n = 200
     grooms = 0
     turns = 0
     for _ in range(n):
+        loco._heading_deg = 0.0
         loco._facing = 1
         loco._begin_pause()
         if loco._last_pause_groomed:
@@ -602,6 +621,7 @@ def test_burst_stays_inside_desktop_bounds() -> None:
             long_burst_px=(400.0, 400.0),
             burst_speed_px_s=500.0,
             pause_sec=(0.01, 0.01),
+            desktop_margin_px=10,
             seed=14,
         ),
         desktop=Rect(0, 0, 400, 300),
@@ -610,11 +630,11 @@ def test_burst_stays_inside_desktop_bounds() -> None:
         seed=14,
     )
     loco.resume_from_desktop(10.0, 0.0)
-    lo = 0.0
-    hi = 350.0
+    x_lo, x_hi, y_lo, y_hi = loco._desktop_walk_bounds()
     for _ in range(200):
         pose = loco.step(0.05)
-        assert lo <= pose.x <= hi
+        assert x_lo <= pose.x <= x_hi
+        assert y_lo <= pose.y <= y_hi
 
 
 def test_burst_stays_inside_window_strip() -> None:
@@ -640,6 +660,7 @@ def test_burst_stays_inside_window_strip() -> None:
         pet_h=50,
         seed=15,
     )
+    loco._mode = LocomotionMode.WINDOW
     loco._state = LocomotionState.ON_WINDOW
     loco._attached_hwnd = 10
     loco._window_offset_x = 10.0
@@ -649,3 +670,221 @@ def test_burst_stays_inside_window_strip() -> None:
     for _ in range(150):
         loco.step(0.05)
         assert 0.0 <= loco._window_offset_x <= max_off
+
+
+def test_desktop_mode_moves_xy() -> None:
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            burst_px=(80.0, 80.0),
+            burst_speed_px_s=200.0,
+            pause_sec=(0.05, 0.05),
+            turn_on_pause_chance=1.0,
+            desktop_turn_deg=(40.0, 90.0),
+            desktop_margin_px=5,
+            seed=21,
+        ),
+        desktop=Rect(0, 0, 800, 600),
+        pet_w=40,
+        pet_h=40,
+        seed=21,
+    )
+    loco.resume_from_desktop(200.0, 200.0)
+    xs: set[int] = set()
+    ys: set[int] = set()
+    for _ in range(300):
+        pose = loco.step(0.05)
+        xs.add(int(pose.x))
+        ys.add(int(pose.y))
+    assert loco.mode == LocomotionMode.DESKTOP
+    assert len(xs) > 1
+    assert len(ys) > 1
+
+
+def test_window_mode_y_frozen() -> None:
+    win = WindowInfo(
+        10,
+        "Target",
+        "Chrome_WidgetWin_1",
+        Rect(100, 80, 700, 480),
+        False,
+        has_caption=True,
+    )
+    api = FakeApi([win])
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            burst_px=(60.0, 60.0),
+            burst_speed_px_s=200.0,
+            pause_sec=(0.05, 0.05),
+            window_stay_sec=(1000, 1000),
+            seed=22,
+        ),
+        api=api,
+        pet_w=40,
+        pet_h=40,
+        seed=22,
+    )
+    loco._mode = LocomotionMode.WINDOW
+    loco._state = LocomotionState.ON_WINDOW
+    loco._attached_hwnd = 10
+    loco._window_offset_x = 20.0
+    loco._heading_deg = 0.0
+    loco._begin_burst()
+    loco._sync_to_window()
+    y0 = loco.pose.y
+    xs: set[int] = set()
+    for _ in range(120):
+        pose = loco.step(0.05)
+        xs.add(int(pose.x))
+        assert pose.y == pytest.approx(y0, abs=0.5)
+    assert len(xs) > 1
+
+
+def test_desktop_turn_on_pause_within_range() -> None:
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            turn_on_pause_chance=1.0,
+            desktop_turn_deg=(20.0, 90.0),
+            seed=23,
+        ),
+        seed=23,
+    )
+    assert loco.mode == LocomotionMode.DESKTOP
+    for _ in range(50):
+        loco._heading_deg = 0.0
+        loco._begin_pause()
+        assert loco._last_pause_turned
+        delta = abs(loco._last_pause_turn_delta)
+        assert 20.0 <= delta <= 90.0
+
+
+def test_desktop_bounce_all_four_edges() -> None:
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            burst_px=(500.0, 500.0),
+            long_burst_chance=0.0,
+            burst_speed_px_s=800.0,
+            pause_sec=(0.01, 0.01),
+            turn_on_pause_chance=0.0,
+            desktop_margin_px=8,
+            seed=24,
+        ),
+        desktop=Rect(0, 0, 300, 250),
+        pet_w=40,
+        pet_h=40,
+        seed=24,
+    )
+    x_lo, x_hi, y_lo, y_hi = loco._desktop_walk_bounds()
+    headings = (0.0, 90.0, 180.0, -90.0)
+    starts = (
+        (x_hi - 5, (y_lo + y_hi) / 2),
+        ((x_lo + x_hi) / 2, y_hi - 5),
+        (x_lo + 5, (y_lo + y_hi) / 2),
+        ((x_lo + x_hi) / 2, y_lo + 5),
+    )
+    for heading, (sx, sy) in zip(headings, starts, strict=True):
+        loco.resume_from_desktop(sx, sy)
+        loco._heading_deg = heading
+        loco._begin_burst()
+        loco._burst_left = 400.0
+        for _ in range(40):
+            pose = loco.step(0.05)
+            assert x_lo <= pose.x <= x_hi
+            assert y_lo <= pose.y <= y_hi
+
+
+def test_flight_decision_rates_and_exclude_same_window() -> None:
+    win_a = _win(10, "A", rect=Rect(0, 0, 500, 400), has_caption=True)
+    win_b = _win(20, "B", rect=Rect(100, 50, 600, 450), has_caption=True)
+    api = FakeApi([win_a, win_b])
+    loco, _, cfg = _make_loco(
+        cfg=FakeWalk(
+            fly_to_window_chance=0.4,
+            leave_to_desktop_chance=0.3,
+            seed=25,
+        ),
+        api=api,
+        seed=25,
+    )
+    n = 200
+    to_win = 0
+    loco._mode = LocomotionMode.DESKTOP
+    for _ in range(n):
+        if loco._choose_flight_kind() == "to_window":
+            to_win += 1
+    assert abs(to_win / n - cfg.fly_to_window_chance) <= 0.10
+
+    to_desk = 0
+    loco._mode = LocomotionMode.WINDOW
+    for _ in range(n):
+        if loco._choose_flight_kind() == "to_desktop":
+            to_desk += 1
+    assert abs(to_desk / n - cfg.leave_to_desktop_chance) <= 0.10
+
+    loco._mode = LocomotionMode.WINDOW
+    loco._attached_hwnd = 10
+    loco._prev_window_hwnd = 10
+    for _ in range(40):
+        pick = loco._pick_window_target(exclude_hwnds={10})
+        assert pick is not None
+        assert pick[0] != 10
+
+
+def test_mode_changes_only_on_landing() -> None:
+    win = _win(10, "A", rect=Rect(300, 100, 800, 500), has_caption=True)
+    api = FakeApi([win])
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(fly_speed_px_s=900.0, seed=26),
+        api=api,
+        seed=26,
+    )
+    loco.resume_from_desktop(50.0, 200.0)
+    assert loco.mode == LocomotionMode.DESKTOP
+    loco._begin_takeoff(to_window=True)
+    assert loco.mode == LocomotionMode.DESKTOP
+    for _ in range(80):
+        loco.step(0.05)
+        if loco.state in {LocomotionState.TAKEOFF, LocomotionState.IN_FLIGHT}:
+            assert loco.mode == LocomotionMode.DESKTOP
+        if loco.state == LocomotionState.ON_WINDOW:
+            break
+    assert loco.state == LocomotionState.ON_WINDOW
+    assert loco.mode == LocomotionMode.WINDOW
+
+    loco._begin_takeoff(to_window=False)
+    assert loco.mode == LocomotionMode.WINDOW
+    for _ in range(80):
+        loco.step(0.05)
+        if loco.state in {
+            LocomotionState.TAKEOFF,
+            LocomotionState.IN_FLIGHT,
+            LocomotionState.LANDING,
+        }:
+            assert loco.mode == LocomotionMode.WINDOW
+        if loco.state == LocomotionState.ON_DESKTOP:
+            break
+    assert loco.state == LocomotionState.ON_DESKTOP
+    assert loco.mode == LocomotionMode.DESKTOP
+
+
+def test_sprite_angle_cardinals() -> None:
+    loco, _, _ = _make_loco(seed=27)
+    loco._state = LocomotionState.ON_DESKTOP
+    loco._heading_deg = 0.0
+    assert loco.sprite_angle_deg() == pytest.approx(0.0, abs=1.0)
+    loco._heading_deg = 180.0
+    assert abs(loco.sprite_angle_deg()) == pytest.approx(180.0, abs=1.0)
+    loco._heading_deg = -90.0
+    assert loco.sprite_angle_deg() == pytest.approx(-90.0, abs=1.0)
+    loco._heading_deg = 90.0
+    assert loco.sprite_angle_deg() == pytest.approx(90.0, abs=1.0)
+
+    loco._state = LocomotionState.IN_FLIGHT
+    loco._x, loco._y = 100.0, 100.0
+    loco._flight_x1, loco._flight_y1 = 200.0, 100.0
+    assert loco.sprite_angle_deg() == pytest.approx(0.0, abs=1.0)
+    loco._flight_x1, loco._flight_y1 = 100.0, 0.0
+    assert loco.sprite_angle_deg() == pytest.approx(-90.0, abs=1.0)
+    loco._flight_x1, loco._flight_y1 = 100.0, 200.0
+    assert loco.sprite_angle_deg() == pytest.approx(90.0, abs=1.0)
+    loco._flight_x1, loco._flight_y1 = 0.0, 100.0
+    assert abs(loco.sprite_angle_deg()) == pytest.approx(180.0, abs=1.0)

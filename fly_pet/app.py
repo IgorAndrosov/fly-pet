@@ -77,11 +77,17 @@ def build_app(config: Config, state_store: StateStore) -> QApplication:
         now = time.monotonic()
         dt = now - last_tick
         last_tick = now
+        prev_needs_mode = needs.mode
         events = needs.tick(dt)
         state.needs = needs.snapshot()
-        if needs.mode != state.mode:
-            state.mode = needs.mode
-            window.set_state(_mode_to_anim(needs.mode))
+        if needs.mode != prev_needs_mode:
+            if needs.mode == "sleep":
+                state.mode = "sleep"
+                window.set_state("sleep")
+            elif prev_needs_mode == "sleep":
+                loco = window._locomotion
+                state.mode = loco.mode.value if loco is not None else "idle"
+                window.set_state("idle")
         for event in events:
             phrase = pick(event.name)
             if phrase:

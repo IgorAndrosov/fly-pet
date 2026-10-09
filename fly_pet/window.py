@@ -10,7 +10,7 @@ from ctypes import wintypes
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
-from PyQt6.QtGui import QMouseEvent, QPaintEvent, QPainter, QPixmap
+from PyQt6.QtGui import QMouseEvent, QPaintEvent, QPainter, QPixmap, QTransform
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from fly_pet.animation import AnimationPlayer
@@ -45,7 +45,33 @@ _MODE_TO_ANIM = {
     "fly": "fly",
     "land": "land",
     "rub": "rub",
+    "desktop": "idle",
+    "window": "idle",
 }
+
+
+def rotate_sprite_frame(
+    frame: QPixmap,
+    angle_deg: float,
+    *,
+    frame_name: str = "",
+    cache: dict[tuple[str, int], QPixmap] | None = None,
+) -> QPixmap:
+    """Повернуть кадр; при угле 0 (после округления до 5°) — исходник без transform."""
+    quantized = int(round(float(angle_deg) / 5.0) * 5)
+    quantized = ((quantized + 180) % 360) - 180
+    if quantized == 0:
+        return frame
+    key = (frame_name or str(frame.cacheKey()), quantized)
+    if cache is not None and key in cache:
+        return cache[key]
+    transform = QTransform().rotate(float(quantized))
+    rotated = frame.transformed(
+        transform, Qt.TransformationMode.SmoothTransformation
+    )
+    if cache is not None:
+        cache[key] = rotated
+    return rotated
 
 
 class FlyWindow(QWidget):
@@ -75,6 +101,8 @@ class FlyWindow(QWidget):
         self._drag_offset = QPoint()
         self._click_through = False
         self._facing = 1
+        self._sprite_angle_deg = 0.0
+        self._rotated_cache: dict[tuple[str, int], QPixmap] = {}
         self._locomotion: Locomotion | None = None
         self._loco_timer: QTimer | None = None
         self._loco_last_mono: float | None = None
@@ -162,6 +190,9 @@ class FlyWindow(QWidget):
         self._loco_last_mono = now
         pose = self._locomotion.step(dt)
         self._facing = int(pose.facing)
+        self._sprite_angle_deg = float(self._locomotion.sprite_angle_deg())
+        if self._state.mode not in {"sleep", "eat"}:
+            self._state.mode = self._locomotion.mode.value
         self.move(int(round(pose.x)), int(round(pose.y)))
         anim = _MODE_TO_ANIM.get(pose.anim, pose.anim)
         self._player.set_state(anim)
@@ -190,15 +221,31 @@ class FlyWindow(QWidget):
         del event
         if self._current_frame is None or self._current_frame.isNull():
             return
+        frame = self._rotated_frame(
+            self._current_frame,
+            self._sprite_angle_deg,
+            frame_name=self._player.state,
+        )
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        x = (self.width() - self._current_frame.width()) // 2
-        y = (self.height() - self._current_frame.height()) // 2
-        if self._facing < 0:
-            painter.translate(self.width(), 0)
-            painter.scale(-1, 1)
-            x = (self.width() - self._current_frame.width()) // 2
-        painter.drawPixmap(x, y, self._current_frame)
+        x = (self.width() - frame.width()) // 2
+        y = (self.height() - frame.height()) // 2
+        painter.drawPixmap(x, y, frame)
+
+    def _rotated_frame(
+        self,
+        frame: QPixmap,
+        angle_deg: float,
+        *,
+        frame_name: str = "",
+    ) -> QPixmap:
+        """Повернуть кадр вокруг центра; угол 0 — пиксель-в-пиксель без transform."""
+        return rotate_sprite_frame(
+            frame,
+            angle_deg,
+            frame_name=frame_name,
+            cache=self._rotated_cache,
+        )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:

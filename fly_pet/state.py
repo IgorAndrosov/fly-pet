@@ -15,7 +15,7 @@ logger = logging.getLogger("fly_pet")
 
 STATE_VERSION = 1
 NEED_KEYS = ("hunger", "energy", "mood", "attention")
-MODES = frozenset({"idle", "walk", "eat", "sleep"})
+MODES = frozenset({"idle", "walk", "eat", "sleep", "desktop", "window"})
 
 
 def _clamp_need(value: Any) -> float:

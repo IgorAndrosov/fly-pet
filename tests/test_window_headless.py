@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import QApplication
 from fly_pet.animation import load_frames
 from fly_pet.config import load_config
 from fly_pet.state import StateStore, default_state
-from fly_pet.window import FlyWindow
+from fly_pet.window import FlyWindow, rotate_sprite_frame
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -250,3 +250,13 @@ def test_desktop_reassert_restores_minimized(qapp: QApplication, tmp_path: Path)
     QApplication.processEvents()
     assert win.isMinimized() is False
     assert win.isVisible() is True
+
+
+def test_rotate_angle_zero_pixel_perfect(window: FlyWindow) -> None:
+    frame = window._current_frame
+    assert frame is not None and not frame.isNull()
+    got = rotate_sprite_frame(frame, 0.0, frame_name="idle")
+    assert got.cacheKey() == frame.cacheKey()
+    assert got.width() == frame.width()
+    assert got.height() == frame.height()
+    assert got.toImage() == frame.toImage()

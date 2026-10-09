@@ -37,7 +37,11 @@ class Needs:
         for key, value in values.items():
             if key not in self._values:
                 self._values[key] = _clamp_need(value)
-        self._mode = mode if mode in {"idle", "walk", "eat", "sleep"} else "idle"
+        self._mode = (
+            mode
+            if mode in {"idle", "walk", "eat", "sleep", "desktop", "window"}
+            else "idle"
+        )
         self._last_event_at: dict[str, float] = {}
         self._time_sec = 0.0
 

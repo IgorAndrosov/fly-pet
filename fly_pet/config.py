@@ -202,6 +202,10 @@ class WalkConfig:
     long_burst_chance: float
     long_burst_px: tuple[float, float]
     turn_on_pause_chance: float
+    fly_to_window_chance: float
+    leave_to_desktop_chance: float
+    desktop_turn_deg: tuple[float, float]
+    desktop_fly_margin_px: int
     fly_speed_px_s: float
     desktop_margin_px: int
     desktop_stay_sec: tuple[float, float]
@@ -420,6 +424,18 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         ),
         turn_on_pause_chance=_as_float(
             walk_raw.get("turn_on_pause_chance"), "walk.turn_on_pause_chance"
+        ),
+        fly_to_window_chance=_as_float(
+            walk_raw.get("fly_to_window_chance"), "walk.fly_to_window_chance"
+        ),
+        leave_to_desktop_chance=_as_float(
+            walk_raw.get("leave_to_desktop_chance"), "walk.leave_to_desktop_chance"
+        ),
+        desktop_turn_deg=_as_float_pair(
+            walk_raw.get("desktop_turn_deg"), "walk.desktop_turn_deg"
+        ),
+        desktop_fly_margin_px=_as_int(
+            walk_raw.get("desktop_fly_margin_px"), "walk.desktop_fly_margin_px"
         ),
         fly_speed_px_s=_as_float(walk_raw.get("fly_speed_px_s"), "walk.fly_speed_px_s"),
         desktop_margin_px=_as_int(

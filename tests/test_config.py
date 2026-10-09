@@ -34,6 +34,10 @@ def test_load_defaults(tmp_path: Path) -> None:
     assert cfg.walk.long_burst_chance == 0.12
     assert cfg.walk.long_burst_px == (180.0, 380.0)
     assert cfg.walk.turn_on_pause_chance == 0.35
+    assert cfg.walk.fly_to_window_chance == 0.5
+    assert cfg.walk.leave_to_desktop_chance == 0.5
+    assert cfg.walk.desktop_turn_deg == (20.0, 90.0)
+    assert cfg.walk.desktop_fly_margin_px == 80
     assert cfg.walk.seed is None
 
 
