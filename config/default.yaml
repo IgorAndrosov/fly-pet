@@ -85,13 +85,22 @@ actions:
 walk:
   enabled: true
   tick_ms: 40                     # период шага локомоции
-  desktop_speed_px_s: 26          # скорость ходьбы по столу
-  window_speed_px_s: 22           # скорость ходьбы по полосе окна
+  # устарело, движение рывками — поля ниже не используются для ходьбы:
+  desktop_speed_px_s: 26
+  window_speed_px_s: 22
+  burst_px: [28, 120]             # длина обычного рывка, px
+  burst_speed_px_s: 165           # скорость рывка, px/с
+  dash_animation_fps: 16          # частота анимации walk во время рывка
+  pause_sec: [0.25, 1.4]          # длительность остановки между рывками
+  groom_chance: 0.45              # шанс потирания лапок на остановке
+  groom_sec: [1.0, 2.6]           # длительность груминга (состояние rub)
+  long_burst_chance: 0.12         # шанс длинного перехода вместо обычного
+  long_burst_px: [180, 380]       # длина длинного рывка, px
+  turn_on_pause_chance: 0.35      # шанс разворота на остановке
   fly_speed_px_s: 520             # скорость полёта
   desktop_margin_px: 12           # отступ от низа рабочей области
   desktop_stay_sec: [8, 25]       # сколько ходит по столу до взлёта
   window_stay_sec: [6, 18]        # сколько живёт на одном окне
-  pause_chance: 0.15              # шанс остановиться на шаге (idle)
   min_window_width: 320
   min_window_height: 160
   ignore_titles: []               # заголовки, на которые садиться нельзя

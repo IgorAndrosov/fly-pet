@@ -191,13 +191,21 @@ class PathsConfig:
 class WalkConfig:
     enabled: bool
     tick_ms: int
-    desktop_speed_px_s: float
-    window_speed_px_s: float
+    desktop_speed_px_s: float  # устарело, движение рывками
+    window_speed_px_s: float  # устарело, движение рывками
+    burst_px: tuple[float, float]
+    burst_speed_px_s: float
+    dash_animation_fps: int
+    pause_sec: tuple[float, float]
+    groom_chance: float
+    groom_sec: tuple[float, float]
+    long_burst_chance: float
+    long_burst_px: tuple[float, float]
+    turn_on_pause_chance: float
     fly_speed_px_s: float
     desktop_margin_px: int
     desktop_stay_sec: tuple[float, float]
     window_stay_sec: tuple[float, float]
-    pause_chance: float
     min_window_width: int
     min_window_height: int
     ignore_titles: list[str]
@@ -394,6 +402,25 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         window_speed_px_s=_as_float(
             walk_raw.get("window_speed_px_s"), "walk.window_speed_px_s"
         ),
+        burst_px=_as_float_pair(walk_raw.get("burst_px"), "walk.burst_px"),
+        burst_speed_px_s=_as_float(
+            walk_raw.get("burst_speed_px_s"), "walk.burst_speed_px_s"
+        ),
+        dash_animation_fps=_as_int(
+            walk_raw.get("dash_animation_fps"), "walk.dash_animation_fps"
+        ),
+        pause_sec=_as_float_pair(walk_raw.get("pause_sec"), "walk.pause_sec"),
+        groom_chance=_as_float(walk_raw.get("groom_chance"), "walk.groom_chance"),
+        groom_sec=_as_float_pair(walk_raw.get("groom_sec"), "walk.groom_sec"),
+        long_burst_chance=_as_float(
+            walk_raw.get("long_burst_chance"), "walk.long_burst_chance"
+        ),
+        long_burst_px=_as_float_pair(
+            walk_raw.get("long_burst_px"), "walk.long_burst_px"
+        ),
+        turn_on_pause_chance=_as_float(
+            walk_raw.get("turn_on_pause_chance"), "walk.turn_on_pause_chance"
+        ),
         fly_speed_px_s=_as_float(walk_raw.get("fly_speed_px_s"), "walk.fly_speed_px_s"),
         desktop_margin_px=_as_int(
             walk_raw.get("desktop_margin_px"), "walk.desktop_margin_px"
@@ -404,7 +431,6 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         window_stay_sec=_as_float_pair(
             walk_raw.get("window_stay_sec"), "walk.window_stay_sec"
         ),
-        pause_chance=_as_float(walk_raw.get("pause_chance"), "walk.pause_chance"),
         min_window_width=_as_int(
             walk_raw.get("min_window_width"), "walk.min_window_width"
         ),

@@ -44,6 +44,7 @@ _MODE_TO_ANIM = {
     "eat": "chew",
     "fly": "fly",
     "land": "land",
+    "rub": "rub",
 }
 
 
@@ -122,12 +123,13 @@ class FlyWindow(QWidget):
         if (
             self._locomotion is not None
             and not self._dragging
-            and name in {"idle", "walk"}
+            and name in {"idle", "walk", "rub"}
             and self._state.mode not in {"sleep", "eat"}
         ):
             return
         anim = _MODE_TO_ANIM.get(name, name)
         self._player.set_state(anim)
+        self._sync_anim_fps(anim)
         self._current_frame = self._player.current_frame()
         self.update()
 
@@ -163,9 +165,22 @@ class FlyWindow(QWidget):
         self.move(int(round(pose.x)), int(round(pose.y)))
         anim = _MODE_TO_ANIM.get(pose.anim, pose.anim)
         self._player.set_state(anim)
+        self._sync_anim_fps(anim)
         self._current_frame = self._player.current_frame()
         self._bubble.follow_anchor()
         self.update()
+
+    def _sync_anim_fps(self, anim: str) -> None:
+        """Во время рывка — dash_animation_fps, иначе обычный tick.animation_fps."""
+        if anim == "walk":
+            fps = int(getattr(self._config.walk, "dash_animation_fps", 0)) or int(
+                self._config.tick.animation_fps
+            )
+        else:
+            fps = int(self._config.tick.animation_fps)
+        interval_ms = max(1, int(round(1000 / max(1, fps))))
+        if self._timer.interval() != interval_ms:
+            self._timer.setInterval(interval_ms)
 
     def _on_tick(self) -> None:
         self._current_frame = self._player.advance()

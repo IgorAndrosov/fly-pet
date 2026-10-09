@@ -21,13 +21,21 @@ from fly_pet.locomotion import (
 class FakeWalk:
     enabled: bool = True
     tick_ms: int = 40
-    desktop_speed_px_s: float = 100.0
-    window_speed_px_s: float = 50.0
+    desktop_speed_px_s: float = 100.0  # устарело
+    window_speed_px_s: float = 50.0  # устарело
+    burst_px: tuple[float, float] = (40.0, 40.0)
+    burst_speed_px_s: float = 100.0
+    dash_animation_fps: int = 16
+    pause_sec: tuple[float, float] = (0.2, 0.2)
+    groom_chance: float = 0.0
+    groom_sec: tuple[float, float] = (1.0, 1.0)
+    long_burst_chance: float = 0.0
+    long_burst_px: tuple[float, float] = (200.0, 200.0)
+    turn_on_pause_chance: float = 0.0
     fly_speed_px_s: float = 500.0
     desktop_margin_px: int = 10
     desktop_stay_sec: tuple[float, float] = (1000.0, 1000.0)
     window_stay_sec: tuple[float, float] = (1000.0, 1000.0)
-    pause_chance: float = 0.0
     min_window_width: int = 320
     min_window_height: int = 160
     ignore_titles: list[str] | None = None
@@ -240,28 +248,36 @@ def test_title_bar_strip_caption_and_custom() -> None:
     assert degenerate is None
 
 
-def test_desktop_walk_distance_and_bounce() -> None:
+def test_desktop_burst_distance_and_bounce() -> None:
     loco, _api, _cfg = _make_loco(
-        cfg=FakeWalk(desktop_speed_px_s=100.0, pause_chance=0.0, seed=1),
+        cfg=FakeWalk(
+            burst_px=(100.0, 100.0),
+            burst_speed_px_s=100.0,
+            pause_sec=(10.0, 10.0),  # длинная пауза после рывка
+            seed=1,
+        ),
         desktop=Rect(0, 0, 500, 400),
         pet_w=50,
         pet_h=50,
     )
     loco.resume_from_desktop(0.0, 0.0)
-    # принудительно направление вправо
     loco._facing = 1
-    loco._vx = 100.0
+    loco._begin_burst()
     x0 = loco.pose.x
     for _ in range(10):
-        loco.step(0.1)  # 10 * 10px = 100px
+        loco.step(0.1)  # 10 * 10px = 100px рывок
     assert loco.pose.x == pytest.approx(x0 + 100.0, abs=0.5)
+    assert loco._walk_phase == "pause"
 
-    # Упираемся в правый край и отражаемся
+    # Упираемся в правый край и отражаемся во время рывка
     loco._x = 450.0  # max = 500-50=450
-    loco._vx = 100.0
+    loco._facing = 1
+    loco._begin_burst()
+    loco._burst_left = 50.0
     loco.step(0.1)
     assert loco._vx < 0
     assert loco.pose.facing == -1
+    assert loco.pose.x <= 450.0
 
 
 def test_flight_approaches_and_lands() -> None:
@@ -277,7 +293,6 @@ def test_flight_approaches_and_lands() -> None:
     loco, _, _ = _make_loco(
         cfg=FakeWalk(
             desktop_stay_sec=(0.01, 0.01),
-            pause_chance=0.0,
             fly_speed_px_s=400.0,
             seed=2,
         ),
@@ -293,7 +308,7 @@ def test_flight_approaches_and_lands() -> None:
     assert loco.state == LocomotionState.IN_FLIGHT
     prev_dist = None
     target = (loco._flight_x1, loco._flight_y1)
-    for _ in range(40):
+    for _ in range(80):
         pose = loco.step(0.05)
         dist = ((pose.x - target[0]) ** 2 + (pose.y - target[1]) ** 2) ** 0.5
         if prev_dist is not None and loco.state == LocomotionState.IN_FLIGHT:
@@ -315,7 +330,7 @@ def test_on_window_follows_target_move() -> None:
     )
     api = FakeApi([win])
     loco, _, _ = _make_loco(
-        cfg=FakeWalk(pause_chance=0.0, window_stay_sec=(1000, 1000), seed=3),
+        cfg=FakeWalk(window_stay_sec=(1000, 1000), seed=3),
         api=api,
     )
     loco._state = LocomotionState.ON_WINDOW
@@ -368,7 +383,9 @@ def test_seed_determinism() -> None:
             cfg=FakeWalk(
                 desktop_stay_sec=(0.2, 0.2),
                 window_stay_sec=(0.2, 0.2),
-                pause_chance=0.2,
+                pause_sec=(0.05, 0.15),
+                groom_chance=0.2,
+                turn_on_pause_chance=0.3,
                 fly_speed_px_s=800.0,
                 seed=seed,
             ),
@@ -395,7 +412,6 @@ def test_failed_attach_detaches_and_retries() -> None:
     api.point_hwnd = 999  # чужой рендер поверх
     loco, _, _ = _make_loco(
         cfg=FakeWalk(
-            pause_chance=0.0,
             window_stay_sec=(1000, 1000),
             max_attach_attempts=3,
             seed=5,
@@ -429,7 +445,6 @@ def test_max_attach_attempts_stays_on_desktop() -> None:
     api.point_hwnd = 999
     loco, _, _ = _make_loco(
         cfg=FakeWalk(
-            pause_chance=0.0,
             desktop_stay_sec=(1000, 1000),
             window_stay_sec=(1000, 1000),
             max_attach_attempts=2,
@@ -455,7 +470,7 @@ def test_successful_attach_verify_clears_attempts() -> None:
     api.z_above_ok = True
     api.point_hwnd = 999  # прозрачность: в точке не мы, но z-порядок ок
     loco, _, _ = _make_loco(
-        cfg=FakeWalk(pause_chance=0.0, window_stay_sec=(1000, 1000), seed=8),
+        cfg=FakeWalk(window_stay_sec=(1000, 1000), seed=8),
         api=api,
     )
     loco._state = LocomotionState.ON_WINDOW
@@ -468,3 +483,169 @@ def test_successful_attach_verify_clears_attempts() -> None:
     assert loco.state == LocomotionState.ON_WINDOW
     assert loco._attach_attempts == 0
     assert not loco._failed_attach_hwnds
+
+
+def test_burst_planner_lengths_and_pauses() -> None:
+    cfg = FakeWalk(
+        burst_px=(28.0, 120.0),
+        long_burst_px=(180.0, 380.0),
+        long_burst_chance=0.12,
+        pause_sec=(0.25, 1.4),
+        groom_chance=0.0,
+        seed=11,
+    )
+    loco, _, _ = _make_loco(cfg=cfg, seed=11)
+    lengths: list[float] = []
+    longs = 0
+    for _ in range(300):
+        dist, is_long = loco._roll_burst_distance()
+        lengths.append(dist)
+        if is_long:
+            longs += 1
+            assert 180.0 <= dist <= 380.0
+        else:
+            assert 28.0 <= dist <= 120.0
+    assert 0.02 <= longs / 300 <= 0.25  # редко, допуск шире ±10 п.п.
+
+    # Между рывками есть паузы ненулевой длины
+    loco.resume_from_desktop(100.0, 0.0)
+    loco._begin_burst()
+    saw_pause = False
+    for _ in range(200):
+        loco.step(0.05)
+        if loco._walk_phase == "pause":
+            assert loco._pause_left > 0
+            saw_pause = True
+            break
+    assert saw_pause
+
+
+def test_pause_position_frozen() -> None:
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            burst_px=(30.0, 30.0),
+            burst_speed_px_s=300.0,
+            pause_sec=(2.0, 2.0),
+            groom_chance=0.0,
+            seed=12,
+        ),
+        seed=12,
+    )
+    loco.resume_from_desktop(200.0, 0.0)
+    loco._begin_burst()
+    # Дождаться паузы
+    for _ in range(50):
+        loco.step(0.05)
+        if loco._walk_phase == "pause":
+            break
+    assert loco._walk_phase == "pause"
+    x0 = loco.pose.x
+    for _ in range(8):
+        loco.step(0.05)
+        assert loco.pose.x == x0
+        assert loco._walk_phase == "pause"
+
+
+def test_groom_and_turn_rates() -> None:
+    groom_chance = 0.45
+    turn_chance = 0.35
+    cfg = FakeWalk(
+        groom_chance=groom_chance,
+        turn_on_pause_chance=turn_chance,
+        pause_sec=(0.5, 0.5),
+        groom_sec=(0.5, 0.5),
+        seed=99,
+    )
+    loco, _, _ = _make_loco(cfg=cfg, seed=99)
+    n = 200
+    grooms = 0
+    turns = 0
+    for _ in range(n):
+        loco._facing = 1
+        loco._begin_pause()
+        if loco._last_pause_groomed:
+            grooms += 1
+            assert loco.pose.anim == "rub"
+        else:
+            assert loco.pose.anim == "idle"
+        if loco._last_pause_turned:
+            turns += 1
+            assert loco._facing == -1
+    assert abs(grooms / n - groom_chance) <= 0.10
+    assert abs(turns / n - turn_chance) <= 0.10
+
+
+def test_burst_anim_states() -> None:
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            burst_px=(50.0, 50.0),
+            burst_speed_px_s=200.0,
+            pause_sec=(0.5, 0.5),
+            groom_chance=1.0,
+            seed=13,
+        ),
+        seed=13,
+    )
+    loco.resume_from_desktop(100.0, 0.0)
+    loco._begin_burst()
+    assert loco.pose.anim == "walk"
+    loco.step(0.3)  # рывок закончится → пауза с rub
+    assert loco._walk_phase == "pause"
+    assert loco.pose.anim == "rub"
+
+
+def test_burst_stays_inside_desktop_bounds() -> None:
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            burst_px=(300.0, 300.0),
+            long_burst_chance=1.0,
+            long_burst_px=(400.0, 400.0),
+            burst_speed_px_s=500.0,
+            pause_sec=(0.01, 0.01),
+            seed=14,
+        ),
+        desktop=Rect(0, 0, 400, 300),
+        pet_w=50,
+        pet_h=50,
+        seed=14,
+    )
+    loco.resume_from_desktop(10.0, 0.0)
+    lo = 0.0
+    hi = 350.0
+    for _ in range(200):
+        pose = loco.step(0.05)
+        assert lo <= pose.x <= hi
+
+
+def test_burst_stays_inside_window_strip() -> None:
+    win = WindowInfo(
+        10,
+        "Target",
+        "Chrome_WidgetWin_1",
+        Rect(100, 50, 500, 400),
+        False,
+        has_caption=True,
+    )
+    api = FakeApi([win])
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            burst_px=(250.0, 250.0),
+            burst_speed_px_s=400.0,
+            pause_sec=(0.01, 0.01),
+            window_stay_sec=(1000, 1000),
+            seed=15,
+        ),
+        api=api,
+        pet_w=50,
+        pet_h=50,
+        seed=15,
+    )
+    loco._state = LocomotionState.ON_WINDOW
+    loco._attached_hwnd = 10
+    loco._window_offset_x = 10.0
+    loco._begin_burst()
+    loco._sync_to_window()
+    max_off = float(400 - 50)  # strip width 400, pet 50
+    for _ in range(150):
+        loco.step(0.05)
+        assert 0.0 <= loco._window_offset_x <= max_off

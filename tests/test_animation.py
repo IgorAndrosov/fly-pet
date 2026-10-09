@@ -31,7 +31,7 @@ def frames(qapp: QApplication) -> dict:
 
 def test_load_all_frames(frames: dict) -> None:
     total = sum(len(v) for v in frames.values())
-    assert total == 18
+    assert total == 22
     assert set(frames) == set(ANIMATION_STATES)
     assert len(frames["idle"]) == 2
     assert len(frames["walk"]) == 6
@@ -39,12 +39,23 @@ def test_load_all_frames(frames: dict) -> None:
     assert len(frames["chew"]) == 2
     assert len(frames["fly"]) == 4
     assert len(frames["land"]) == 1
+    assert len(frames["rub"]) == 4
     for state in ANIMATION_STATES:
         assert frames[state], f"пустая группа {state}"
         for pixmap in frames[state]:
             assert not pixmap.isNull()
             assert pixmap.width() == 64
             assert pixmap.height() == 64
+
+
+def test_rub_state_cycles(frames: dict) -> None:
+    player = AnimationPlayer(frames, fps=8)
+    player.set_state("rub")
+    assert player.state == "rub"
+    assert len(frames["rub"]) == 4
+    keys = [player.advance().cacheKey() for _ in range(4)]
+    assert len(set(keys)) == 4
+    assert player.advance().cacheKey() == keys[0]
 
 
 def test_advance_cycles(frames: dict) -> None:

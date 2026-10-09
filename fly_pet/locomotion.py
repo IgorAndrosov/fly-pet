@@ -538,7 +538,7 @@ class Locomotion(LocomotionDriver):
         self._x = float(desktop.left + max(0, (desktop.width - pet_width) // 2))
         self._y = self._desktop_y()
         self._facing = 1
-        self._vx = float(getattr(walk_cfg, "desktop_speed_px_s", 26))
+        self._vx = 0.0
         self._paused = False
         self._stay_left = self._roll_stay(
             getattr(walk_cfg, "desktop_stay_sec", (8.0, 25.0))
@@ -558,6 +558,15 @@ class Locomotion(LocomotionDriver):
         self._attach_attempts = 0
         self._failed_attach_hwnds: set[int] = set()
         self._attach_verify_left: int | None = None
+        # Прерывистая ходьба: рывок → пауза (idle/rub)
+        self._walk_phase = "burst"  # "burst" | "pause"
+        self._burst_left = 0.0
+        self._pause_left = 0.0
+        self._last_burst_px = 0.0
+        self._last_burst_was_long = False
+        self._last_pause_groomed = False
+        self._last_pause_turned = False
+        self._begin_burst()
 
     @property
     def state(self) -> LocomotionState:
@@ -593,13 +602,10 @@ class Locomotion(LocomotionDriver):
         self._attach_attempts = 0
         self._failed_attach_hwnds.clear()
         self._state = LocomotionState.ON_DESKTOP
-        self._anim = "walk"
         self._stay_left = self._roll_stay(
             getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
         )
-        self._vx = abs(float(getattr(self._cfg, "desktop_speed_px_s", 26))) * (
-            1 if self._facing >= 0 else -1
-        )
+        self._begin_burst()
         our = self._our_hwnd_getter()
         if our:
             self._api.detach_to_desktop(our)
@@ -633,6 +639,9 @@ class Locomotion(LocomotionDriver):
             lo, hi = hi, lo
         return float(self._rng.uniform(lo, hi))
 
+    def _roll_pair(self, pair: Sequence[float]) -> float:
+        return self._roll_stay(pair)
+
     def _clamp_desktop_x(self, x: float) -> float:
         lo = float(self._desktop.left)
         hi = float(self._desktop.right - self._pet_w)
@@ -640,27 +649,108 @@ class Locomotion(LocomotionDriver):
             return lo
         return max(lo, min(hi, x))
 
+    def _roll_burst_distance(self) -> tuple[float, bool]:
+        """Длина следующего рывка и флаг «длинный»."""
+        long_chance = float(getattr(self._cfg, "long_burst_chance", 0.12))
+        is_long = self._rng.random() < long_chance
+        if is_long:
+            pair = getattr(self._cfg, "long_burst_px", (180.0, 380.0))
+        else:
+            pair = getattr(self._cfg, "burst_px", (28.0, 120.0))
+        return self._roll_pair(pair), is_long
+
+    def _begin_burst(self) -> None:
+        dist, is_long = self._roll_burst_distance()
+        speed = abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
+        self._last_burst_px = dist
+        self._last_burst_was_long = is_long
+        self._burst_left = dist
+        self._pause_left = 0.0
+        self._walk_phase = "burst"
+        self._anim = "walk"
+        self._vx = speed * (1 if self._facing >= 0 else -1)
+
+    def _begin_pause(self) -> None:
+        turn_chance = float(getattr(self._cfg, "turn_on_pause_chance", 0.35))
+        turned = self._rng.random() < turn_chance
+        if turned:
+            self._facing = -1 if self._facing >= 0 else 1
+        self._last_pause_turned = turned
+
+        groom_chance = float(getattr(self._cfg, "groom_chance", 0.45))
+        groomed = self._rng.random() < groom_chance
+        self._last_pause_groomed = groomed
+        if groomed:
+            self._anim = "rub"
+            self._pause_left = self._roll_pair(
+                getattr(self._cfg, "groom_sec", (1.0, 2.6))
+            )
+        else:
+            self._anim = "idle"
+            self._pause_left = self._roll_pair(
+                getattr(self._cfg, "pause_sec", (0.25, 1.4))
+            )
+        self._walk_phase = "pause"
+        self._burst_left = 0.0
+        self._vx = 0.0
+
+    def _bounce_step(
+        self, x: float, dx: float, lo: float, hi: float
+    ) -> tuple[float, int]:
+        """Сдвиг на dx с отражением от краёв; возвращает (x, facing)."""
+        if hi < lo:
+            return lo, self._facing
+        if abs(dx) <= 0:
+            return max(lo, min(hi, x)), self._facing
+        new_x = x + dx
+        facing = 1 if dx >= 0 else -1
+        for _ in range(8):
+            if new_x < lo:
+                new_x = lo + (lo - new_x)
+                facing = 1
+            elif new_x > hi:
+                new_x = hi - (new_x - hi)
+                facing = -1
+            else:
+                break
+        return max(lo, min(hi, new_x)), facing
+
+    def _advance_burst_x(self, cur_x: float, dt: float, lo: float, hi: float) -> float:
+        """Сдвинуть X на один тик рывка; вернуть новую координату."""
+        self._anim = "walk"
+        speed = abs(float(getattr(self._cfg, "burst_speed_px_s", 165)))
+        if abs(self._vx) < 1e-9:
+            self._vx = speed * (1 if self._facing >= 0 else -1)
+        step = min(abs(self._vx) * dt, max(0.0, self._burst_left))
+        if step <= 0:
+            self._begin_pause()
+            return cur_x
+        signed = step if self._vx >= 0 else -step
+        new_x, facing = self._bounce_step(cur_x, signed, lo, hi)
+        self._facing = facing
+        self._vx = speed * (1 if facing >= 0 else -1)
+        if hi > lo:
+            self._burst_left = max(0.0, self._burst_left - step)
+        else:
+            self._burst_left = 0.0
+        if self._burst_left <= 1e-6:
+            self._begin_pause()
+        return new_x
+
+    def _tick_walk_or_pause(self, dt: float, cur_x: float, lo: float, hi: float) -> float:
+        """Тик прерывистой ходьбы; возвращает новый x (в паузе — без изменений)."""
+        if self._walk_phase == "pause":
+            self._pause_left -= dt
+            if self._pause_left <= 0:
+                self._begin_burst()
+            return cur_x
+        return self._advance_burst_x(cur_x, dt, lo, hi)
+
     def _step_desktop(self, dt: float) -> None:
         self._y = self._desktop_y()
-        pause_chance = float(getattr(self._cfg, "pause_chance", 0.15))
-        speed = float(getattr(self._cfg, "desktop_speed_px_s", 26))
-        if self._rng.random() < pause_chance:
-            self._anim = "idle"
-        else:
-            self._anim = "walk"
-            self._x = self._clamp_desktop_x(self._x + self._vx * dt)
-            lo = float(self._desktop.left)
-            hi = float(self._desktop.right - self._pet_w)
-            if self._x <= lo and self._vx < 0:
-                self._vx = abs(speed)
-                self._facing = 1
-                self._x = lo
-            elif self._x >= hi and self._vx > 0:
-                self._vx = -abs(speed)
-                self._facing = -1
-                self._x = hi
-            else:
-                self._facing = 1 if self._vx >= 0 else -1
+        lo = float(self._desktop.left)
+        hi = float(self._desktop.right - self._pet_w)
+        self._x = self._tick_walk_or_pause(dt, self._x, lo, hi)
 
         self._stay_left -= dt
         if self._stay_left <= 0:
@@ -682,12 +772,12 @@ class Locomotion(LocomotionDriver):
             if self._attach_attempts >= self._max_attach_attempts():
                 # Лимит неудачных посадок — только ходьба по столу
                 self._state = LocomotionState.ON_DESKTOP
-                self._anim = "walk"
                 self._attach_attempts = 0
                 self._failed_attach_hwnds.clear()
                 self._stay_left = self._roll_stay(
                     getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
                 )
+                self._begin_burst()
                 our = self._our_hwnd_getter()
                 if our:
                     self._api.detach_to_desktop(our)
@@ -699,12 +789,12 @@ class Locomotion(LocomotionDriver):
             else:
                 # Некуда лететь — остаёмся на столе
                 self._state = LocomotionState.ON_DESKTOP
-                self._anim = "walk"
                 self._attach_attempts = 0
                 self._failed_attach_hwnds.clear()
                 self._stay_left = self._roll_stay(
                     getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
                 )
+                self._begin_burst()
                 return
             self._flight_to_desktop = False
         else:
@@ -818,25 +908,20 @@ class Locomotion(LocomotionDriver):
         if self._phase_t >= _LANDING_SEC:
             if self._attached_hwnd is None:
                 self._state = LocomotionState.ON_DESKTOP
-                self._anim = "walk"
                 self._y = self._desktop_y()
                 self._attach_attempts = 0
                 self._failed_attach_hwnds.clear()
                 self._stay_left = self._roll_stay(
                     getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
                 )
-                self._vx = abs(float(getattr(self._cfg, "desktop_speed_px_s", 26))) * (
-                    1 if self._facing >= 0 else -1
-                )
+                self._begin_burst()
             else:
                 self._state = LocomotionState.ON_WINDOW
-                self._anim = "walk"
                 self._attach_verify_left = _ATTACH_VERIFY_TICKS
-                speed = float(getattr(self._cfg, "window_speed_px_s", 22))
-                self._vx = abs(speed) * (1 if self._facing >= 0 else -1)
                 self._stay_left = self._roll_stay(
                     getattr(self._cfg, "window_stay_sec", (6.0, 18.0))
                 )
+                self._begin_burst()
 
     def _step_on_window(self, dt: float) -> None:
         if self._attached_hwnd is None or not self._api.is_window(self._attached_hwnd):
@@ -865,26 +950,12 @@ class Locomotion(LocomotionDriver):
             self._begin_takeoff(to_window=False)
             return
 
-        pause_chance = float(getattr(self._cfg, "pause_chance", 0.15))
-        speed = float(getattr(self._cfg, "window_speed_px_s", 22))
-        if self._rng.random() < pause_chance:
-            self._anim = "idle"
-        else:
-            self._anim = "walk"
-            self._window_offset_x += self._vx * dt
-            max_off = float(max(0, strip.width - self._pet_w))
-            if self._window_offset_x <= 0 and self._vx < 0:
-                self._window_offset_x = 0.0
-                self._vx = abs(speed)
-                self._facing = 1
-            elif self._window_offset_x >= max_off and self._vx > 0:
-                self._window_offset_x = max_off
-                self._vx = -abs(speed)
-                self._facing = -1
-            else:
-                self._facing = 1 if self._vx >= 0 else -1
-            self._x = float(strip.left) + self._window_offset_x
-            self._y = float(strip.top + strip.height / 2 - self._pet_h / 2)
+        max_off = float(max(0, strip.width - self._pet_w))
+        self._window_offset_x = self._tick_walk_or_pause(
+            dt, self._window_offset_x, 0.0, max_off
+        )
+        self._x = float(strip.left) + self._window_offset_x
+        self._y = float(strip.top + strip.height / 2 - self._pet_h / 2)
 
         self._stay_left -= dt
         if self._stay_left <= 0:

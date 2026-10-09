@@ -25,6 +25,15 @@ def test_load_defaults(tmp_path: Path) -> None:
     assert cfg.walk.enabled is True
     assert cfg.walk.tick_ms == 40
     assert cfg.walk.desktop_stay_sec == (8.0, 25.0)
+    assert cfg.walk.burst_px == (28.0, 120.0)
+    assert cfg.walk.burst_speed_px_s == 165.0
+    assert cfg.walk.dash_animation_fps == 16
+    assert cfg.walk.pause_sec == (0.25, 1.4)
+    assert cfg.walk.groom_chance == 0.45
+    assert cfg.walk.groom_sec == (1.0, 2.6)
+    assert cfg.walk.long_burst_chance == 0.12
+    assert cfg.walk.long_burst_px == (180.0, 380.0)
+    assert cfg.walk.turn_on_pause_chance == 0.35
     assert cfg.walk.seed is None
 
 

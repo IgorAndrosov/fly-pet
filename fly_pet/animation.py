@@ -7,9 +7,9 @@ from pathlib import Path
 
 from PyQt6.QtGui import QPixmap
 
-ANIMATION_STATES = ("idle", "walk", "sleep", "chew", "fly", "land")
+ANIMATION_STATES = ("idle", "walk", "sleep", "chew", "fly", "land", "rub")
 _FRAME_RE = re.compile(
-    r"^(?P<state>idle|walk|sleep|chew|fly|land)_(?P<num>\d+)\.png$",
+    r"^(?P<state>idle|walk|sleep|chew|fly|land|rub)_(?P<num>\d+)\.png$",
     re.IGNORECASE,
 )
 
