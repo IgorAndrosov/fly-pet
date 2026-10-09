@@ -1,0 +1,10 @@
+window:
+  title: "fly-pet-check"
+  desktop_reassert: true
+  desktop_reassert_ms: 800
+walk:
+  scare_cursor: false
+  desktop_stay_sec: [1, 2]
+  fly_to_window_chance: 1.0
+  window_stay_sec: [90, 120]
+  pause_sec: [0.2, 0.6]
