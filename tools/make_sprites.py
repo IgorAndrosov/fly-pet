@@ -103,10 +103,10 @@ def draw_front_rubbing(d, cy: float, phase: float) -> None:
         root = (40.0, cy + side * 4.0)
         knee = (47.5 + 0.9 * rub, cy + side * 2.8)          # сомкнуты к центру
         tip = (56.0 + 1.8 * rub, cy + side * 6.2)           # кончики разведены, впереди головы
-        seg(d, root, knee, 1.5, LEG_HL)
-        seg(d, knee, tip, 1.2, LEG_HL)
+        seg(d, root, knee, 1.5)
+        seg(d, knee, tip, 1.2)
         joint(d, knee, 0.8, LEG_HL)
-        joint(d, tip, 0.65, LEG_HL)
+        joint(d, tip, 0.65)
 
 
 def draw_fly(*, legs_phase: float = 0.0, leg_scale: float = 1.0, body_dy: float = 0.0,
@@ -129,6 +129,10 @@ def draw_fly(*, legs_phase: float = 0.0, leg_scale: float = 1.0, body_dy: float 
                 swing = -swing
             draw_leg(d, pair, side, cy, swing, leg_scale)
 
+    # --- передние лапки при груминге: под телом, чтобы выглядывали из-за головы ---
+    if rub_phase is not None:
+        draw_front_rubbing(d, cy, rub_phase)
+
     # --- брюшко ---
     ab = 16.0 * body_len
     d.ellipse([px(30.0 - ab), px(cy - 7.6), px(30.0 + 4.0), px(cy + 7.6)], fill=ABDOMEN,
@@ -140,7 +144,6 @@ def draw_fly(*, legs_phase: float = 0.0, leg_scale: float = 1.0, body_dy: float 
 
     # --- грудь ---
     d.ellipse([px(28.0), px(cy - 9.2), px(44.0), px(cy + 9.2)], fill=THORAX)
-    d.ellipse([px(31.0), px(cy - 7.0), px(42.0), px(cy + 0.5)], fill=THORAX_HL)
 
     # --- голова и глаза ---
     hx = 47.0
@@ -160,10 +163,6 @@ def draw_fly(*, legs_phase: float = 0.0, leg_scale: float = 1.0, body_dy: float 
     if chewing:
         d.line([(px(hx + 6.0), px(hy + 2.6)), (px(hx + 10.0), px(hy + 3.2))],
                fill=(92, 94, 108, 255), width=int(1.0 * S))
-
-    # --- передние лапки при груминге (поверх груди и головы) ---
-    if rub_phase is not None:
-        draw_front_rubbing(d, cy, rub_phase)
 
     # --- крылья поверх корпуса ---
     for side in (-1, 1):
