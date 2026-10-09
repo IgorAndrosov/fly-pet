@@ -100,9 +100,10 @@ def draw_front_rubbing(d, cy: float, phase: float) -> None:
     """Передние лапки перед лицом: смыкаются у основания, кончики слегка разведены."""
     for side in (-1, 1):
         rub = math.sin(phase * 2 * math.pi + (0.0 if side < 0 else math.pi))
-        root = (40.0, cy + side * 4.0)
-        knee = (47.5 + 0.9 * rub, cy + side * 2.8)          # сомкнуты к центру
-        tip = (56.0 + 1.8 * rub, cy + side * 6.2)           # кончики разведены, впереди головы
+        # локти сходятся почти вплотную уже ВПЕРЕДИ головы, кончики чуть расходятся
+        root = (41.0, cy + side * 3.6)
+        knee = (53.5 + 0.6 * rub, cy + side * 0.7)
+        tip = (61.0 + 1.4 * rub, cy + side * 5.4)
         seg(d, root, knee, 1.5)
         seg(d, knee, tip, 1.2)
         joint(d, knee, 0.8, LEG_HL)
