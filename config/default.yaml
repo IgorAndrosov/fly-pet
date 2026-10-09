@@ -1,0 +1,71 @@
+app:
+  locale: ru
+  data_dir: null          # null → каталог _data рядом с корнем репозитория
+
+window:
+  width: 96
+  height: 96
+  always_on_top: false
+  click_through: false
+  feeding_point: { x: null, y: null }  # null → правый нижний угол рабочей области
+  title: "fly-pet"
+
+tick:
+  needs_interval_sec: 30
+  brain_interval_sec: 120
+  animation_fps: 8
+
+needs:
+  start:
+    hunger: 40
+    energy: 70
+    mood: 60
+    attention: 50
+  decay_per_minute:
+    hunger: 0.8
+    energy: 0.5
+    mood: 0.3
+    attention: 1.0
+  thresholds:
+    sleep_energy_below: 20
+    complain_hunger_above: 70
+
+llm:
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  timeout_sec: 30
+  max_tokens: 256
+  temperature: 0.4
+
+safety:
+  dry_run: true
+  allow_real_actions: false
+
+desktop:
+  use_registry_path: true
+  allowed_extensions: []
+  blocked_extensions: [".lnk", ".url", ".ini"]
+  blocked_names: ["desktop.ini"]
+  exclude_globs: []
+  min_age_days: 7
+  skip_hidden: true
+  skip_system: true
+  files_only: true
+  never_dirs: ["C:/Users/Public/Desktop"]
+
+actions:
+  - name: eat_desktop_file
+    enabled: true
+    params: {}
+  - name: report
+    enabled: true
+    params: {}
+  - name: idle_nudge
+    enabled: true
+    params: { idle_after_sec: 900 }
+  - name: sleep
+    enabled: true
+    params: {}
+
+paths:
+  hermes_env: "C:/Users/igora/AppData/Local/hermes/.env"
