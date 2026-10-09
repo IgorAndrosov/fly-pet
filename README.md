@@ -86,6 +86,15 @@ Stop-Process -Id (Get-CimInstance Win32_Process -Filter "name like '%python%'" |
   Where-Object { $_.CommandLine -like '*fly_pet*' }).ProcessId -Force
 ```
 
+Для сборок в exe имена процессов другие, и у варианта «один файл» exe запускает **дочерний** процесс
+с тем же именем — при ручном снятии надо убить оба:
+
+```powershell
+Stop-Process -Name fly-pet,fly-pet-onefile -Force -ErrorAction SilentlyContinue
+```
+
+Пункт «Выход» в трее делает это сам и сохраняет состояние — это правильный способ выключения.
+
 ## Проверки
 
 ```bash
