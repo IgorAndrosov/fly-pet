@@ -201,6 +201,7 @@ class WalkConfig:
     min_window_width: int
     min_window_height: int
     ignore_titles: list[str]
+    max_attach_attempts: int
     seed: int | None
 
 
@@ -412,6 +413,9 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         ),
         ignore_titles=_as_str_list(
             walk_raw.get("ignore_titles"), "walk.ignore_titles"
+        ),
+        max_attach_attempts=_as_int(
+            walk_raw.get("max_attach_attempts"), "walk.max_attach_attempts"
         ),
         seed=walk_seed,
     )

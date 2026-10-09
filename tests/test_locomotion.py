@@ -31,6 +31,7 @@ class FakeWalk:
     min_window_width: int = 320
     min_window_height: int = 160
     ignore_titles: list[str] | None = None
+    max_attach_attempts: int = 3
     seed: int | None = 1
 
     def __post_init__(self) -> None:
@@ -38,11 +39,30 @@ class FakeWalk:
             self.ignore_titles = []
 
 
+def _win(
+    hwnd: int,
+    title: str = "Ok",
+    class_name: str = "Chrome_WidgetWin_1",
+    rect: Rect | None = None,
+    **kwargs: object,
+) -> WindowInfo:
+    return WindowInfo(
+        hwnd,
+        title,
+        class_name,
+        rect or Rect(0, 0, 400, 300),
+        False,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
 class FakeApi:
     def __init__(self, windows: list[WindowInfo] | None = None) -> None:
         self.windows = list(windows or [])
         self.attach_calls: list[tuple[int, int]] = []
         self.detach_calls: list[int] = []
+        self.point_hwnd: int = 42  # по умолчанию в точке — наша муха
+        self.z_above_ok: bool = True  # по умолчанию z-порядок верный
 
     def list_windows(self) -> list[WindowInfo]:
         return list(self.windows)
@@ -62,6 +82,8 @@ class FakeApi:
         )
 
     def attach_above(self, our_hwnd: int, target_hwnd: int) -> None:
+        if not self.is_window(target_hwnd):
+            return
         self.attach_calls.append((our_hwnd, target_hwnd))
 
     def detach_to_desktop(self, our_hwnd: int) -> None:
@@ -69,6 +91,22 @@ class FakeApi:
 
     def find_desktop_hwnd(self) -> int | None:
         return 1
+
+    def window_from_point(self, x: int, y: int) -> int:
+        del x, y
+        return int(self.point_hwnd)
+
+    def is_window(self, hwnd: int) -> bool:
+        if hwnd == 42:
+            return True
+        return any(info.hwnd == hwnd for info in self.windows)
+
+    def is_our_window(self, hwnd: int, our_hwnd: int) -> bool:
+        return hwnd == our_hwnd
+
+    def is_immediately_above(self, our_hwnd: int, target_hwnd: int) -> bool:
+        del our_hwnd, target_hwnd
+        return bool(self.z_above_ok)
 
     def move_window(self, hwnd: int, dx: int, dy: int) -> None:
         updated: list[WindowInfo] = []
@@ -121,17 +159,52 @@ def test_filter_empty_stays_desktop() -> None:
 
 def test_filter_by_title_size_class() -> None:
     windows = [
-        WindowInfo(1, "Ok", "Chrome_WidgetWin_1", Rect(0, 0, 400, 300), False),
-        WindowInfo(2, "Tiny", "Chrome_WidgetWin_1", Rect(0, 0, 100, 100), False),
-        WindowInfo(3, "Secret", "Chrome_WidgetWin_1", Rect(0, 0, 400, 300), False),
-        WindowInfo(4, "Desktop", "Progman", Rect(0, 0, 800, 600), False),
-        WindowInfo(5, "", "Chrome_WidgetWin_1", Rect(0, 0, 400, 300), False),
+        _win(1, "Ok"),
+        _win(2, "Tiny", rect=Rect(0, 0, 100, 100)),
+        _win(3, "Secret"),
+        _win(4, "Desktop", "Progman", Rect(0, 0, 800, 600)),
+        _win(5, ""),
     ]
     got = filter_window_candidates(
         windows,
         min_width=320,
         min_height=160,
         ignore_titles=["Secret"],
+    )
+    assert [w.hwnd for w in got] == [1]
+
+
+def test_filter_rejects_each_rule() -> None:
+    """По одному кейсу на каждый пункт жёсткого фильтра."""
+    good = _win(1, "Good", has_caption=True, has_sysmenu=True)
+    cases = [
+        replace(good, hwnd=2, visible=False),
+        replace(good, hwnd=3, iconic=True),
+        replace(good, hwnd=4, rect=Rect(0, 0, 0, 0)),
+        replace(good, hwnd=5, rect=Rect(0, 0, 100, 100)),  # меньше min
+        replace(good, hwnd=6, intersects_screen=False),
+        replace(good, hwnd=7, has_owner=True),
+        replace(good, hwnd=8, is_tool_window=True),
+        replace(good, hwnd=9, has_caption=False, has_sysmenu=False),
+        replace(good, hwnd=10, class_name="IME"),
+        replace(good, hwnd=11, class_name="ASUS AsHotkeyExec App Class"),
+        replace(good, hwnd=12, class_name="ApplicationFrameWindow"),
+        replace(good, hwnd=13, title=""),
+        replace(good, hwnd=14, title="Secret"),
+    ]
+    got = filter_window_candidates(
+        [good, *cases],
+        min_width=320,
+        min_height=160,
+        ignore_titles=["Secret"],
+    )
+    assert [w.hwnd for w in got] == [1]
+
+
+def test_filter_accepts_sysmenu_without_caption() -> None:
+    win = _win(1, "Borderless", has_caption=False, has_sysmenu=True)
+    got = filter_window_candidates(
+        [win], min_width=320, min_height=160, ignore_titles=[]
     )
     assert [w.hwnd for w in got] == [1]
 
@@ -311,3 +384,87 @@ def test_seed_determinism() -> None:
 
     assert run(42) == run(42)
     assert run(42) != run(43)
+
+
+def test_failed_attach_detaches_and_retries() -> None:
+    """Неудачная посадка (сбит z-порядок) → detach и выбор другого окна."""
+    win_a = _win(10, "A", rect=Rect(200, 100, 700, 500), has_caption=True)
+    win_b = _win(20, "B", rect=Rect(100, 50, 600, 450), has_caption=True)
+    api = FakeApi([win_a, win_b])
+    api.z_above_ok = False
+    api.point_hwnd = 999  # чужой рендер поверх
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            pause_chance=0.0,
+            window_stay_sec=(1000, 1000),
+            max_attach_attempts=3,
+            seed=5,
+        ),
+        api=api,
+    )
+    loco._state = LocomotionState.ON_WINDOW
+    loco._attached_hwnd = 10
+    loco._window_offset_x = 10.0
+    loco._attach_attempts = 1
+    loco._attach_verify_left = 1
+    loco._sync_to_window()
+    loco.step(0.05)
+    assert 10 in loco._failed_attach_hwnds
+    assert api.detach_calls  # откат на стол
+    assert loco.state in {
+        LocomotionState.TAKEOFF,
+        LocomotionState.ON_DESKTOP,
+        LocomotionState.IN_FLIGHT,
+    }
+    # Не возвращаемся на проваленный hwnd в этой серии
+    if loco._flight_target_hwnd is not None:
+        assert loco._flight_target_hwnd != 10
+
+
+def test_max_attach_attempts_stays_on_desktop() -> None:
+    """После max_attach_attempts подряд — только ходьба по столу."""
+    win = _win(10, "A", rect=Rect(200, 100, 700, 500), has_caption=True)
+    api = FakeApi([win])
+    api.z_above_ok = False
+    api.point_hwnd = 999
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            pause_chance=0.0,
+            desktop_stay_sec=(1000, 1000),
+            window_stay_sec=(1000, 1000),
+            max_attach_attempts=2,
+            seed=6,
+        ),
+        api=api,
+    )
+    loco._state = LocomotionState.ON_WINDOW
+    loco._attached_hwnd = 10
+    loco._window_offset_x = 10.0
+    loco._attach_attempts = 2  # лимит уже исчерпан
+    loco._failed_attach_hwnds.add(10)
+    loco._attach_verify_left = 1
+    loco._sync_to_window()
+    loco.step(0.05)
+    assert loco.state == LocomotionState.ON_DESKTOP
+    assert loco._attached_hwnd is None
+
+
+def test_successful_attach_verify_clears_attempts() -> None:
+    win = _win(10, "A", rect=Rect(200, 100, 700, 500), has_caption=True)
+    api = FakeApi([win])
+    api.z_above_ok = True
+    api.point_hwnd = 999  # прозрачность: в точке не мы, но z-порядок ок
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(pause_chance=0.0, window_stay_sec=(1000, 1000), seed=8),
+        api=api,
+    )
+    loco._state = LocomotionState.ON_WINDOW
+    loco._attached_hwnd = 10
+    loco._window_offset_x = 10.0
+    loco._attach_attempts = 2
+    loco._attach_verify_left = 1
+    loco._sync_to_window()
+    loco.step(0.05)
+    assert loco.state == LocomotionState.ON_WINDOW
+    assert loco._attach_attempts == 0
+    assert not loco._failed_attach_hwnds

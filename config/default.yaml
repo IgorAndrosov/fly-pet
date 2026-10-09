@@ -95,6 +95,7 @@ walk:
   min_window_width: 320
   min_window_height: 160
   ignore_titles: []               # заголовки, на которые садиться нельзя
+  max_attach_attempts: 3          # подряд неудачных посадок, дальше — только стол
   seed: null                      # сид генератора (для тестов)
 
 paths:

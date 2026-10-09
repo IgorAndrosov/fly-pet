@@ -16,25 +16,43 @@ logger = logging.getLogger("fly_pet")
 
 GWL_STYLE = -16
 GWL_EXSTYLE = -20
+GW_OWNER = 4
+GW_HWNDNEXT = 2
+GW_HWNDPREV = 3
+GA_ROOT = 2
 WS_CAPTION = 0x00C00000
+WS_SYSMENU = 0x00080000
 WS_EX_TOOLWINDOW = 0x00000080
 SM_CYCAPTION = 4
 SM_CYFRAME = 32
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
 HWND_TOP = 0
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
 
-_SHELL_CLASSES = frozenset(
+_BLOCKED_CLASSES = frozenset(
     {
+        "IME",
+        "MSCTFIME UI",
+        "Chrome_RenderWidgetHostHWND",
+        "_q_titlebar",
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
         "Progman",
         "WorkerW",
         "SHELLDLL_DefView",
         "SysListView32",
-        "Shell_TrayWnd",
-        "Shell_SecondaryTrayWnd",
+        "DummyDwmListenerWindow",
+        "AsHotkeyExec",
+        "ApplicationFrameWindow",
     }
 )
+_BLOCKED_CLASS_SUBSTRINGS = frozenset({"AsHotkeyExec"})
+_ATTACH_VERIFY_TICKS = 2
 
 _TAKEOFF_SEC = 0.35
 _TAKEOFF_RISE_PX = 56.0
@@ -80,6 +98,12 @@ class WindowInfo:
     is_foreground: bool
     has_caption: bool = True
     client_top_screen: int | None = None
+    visible: bool = True
+    iconic: bool = False
+    has_owner: bool = False
+    is_tool_window: bool = False
+    has_sysmenu: bool = False
+    intersects_screen: bool = True
 
 
 class LocomotionState(Enum):
@@ -125,6 +149,18 @@ class WindowApi(Protocol):
     def find_desktop_hwnd(self) -> int | None:
         ...
 
+    def window_from_point(self, x: int, y: int) -> int:
+        ...
+
+    def is_window(self, hwnd: int) -> bool:
+        ...
+
+    def is_our_window(self, hwnd: int, our_hwnd: int) -> bool:
+        ...
+
+    def is_immediately_above(self, our_hwnd: int, target_hwnd: int) -> bool:
+        ...
+
 
 def title_bar_strip_from_metrics(
     window_rect: Rect,
@@ -157,6 +193,21 @@ def title_bar_strip_from_metrics(
     return strip
 
 
+def _class_is_blocked(class_name: str) -> bool:
+    if class_name in _BLOCKED_CLASSES:
+        return True
+    return any(token in class_name for token in _BLOCKED_CLASS_SUBSTRINGS)
+
+
+def _rects_intersect(a: Rect, b: Rect) -> bool:
+    return not (
+        a.right <= b.left
+        or a.left >= b.right
+        or a.bottom <= b.top
+        or a.top >= b.bottom
+    )
+
+
 def filter_window_candidates(
     windows: Sequence[WindowInfo],
     *,
@@ -164,20 +215,39 @@ def filter_window_candidates(
     min_height: int,
     ignore_titles: Sequence[str],
     our_hwnd: int | None = None,
+    exclude_hwnds: Sequence[int] | None = None,
+    screen: Rect | None = None,
 ) -> list[WindowInfo]:
-    """Отфильтровать кандидатов по классу, размеру, заголовку и своему hwnd."""
+    """Жёсткий отбор окон-кандидатов для посадки."""
     ignored = {t.casefold() for t in ignore_titles}
+    excluded = set(exclude_hwnds or ())
     result: list[WindowInfo] = []
     for info in windows:
         if our_hwnd is not None and info.hwnd == our_hwnd:
             continue
+        if info.hwnd in excluded:
+            continue
+        if not info.visible or info.iconic:
+            continue
+        if info.rect.width <= 0 or info.rect.height <= 0:
+            continue
+        if info.rect.width < min_width or info.rect.height < min_height:
+            continue
+        if not info.intersects_screen:
+            continue
+        if screen is not None and not _rects_intersect(info.rect, screen):
+            continue
+        if info.has_owner:
+            continue
+        if info.is_tool_window:
+            continue
+        if not (info.has_caption or info.has_sysmenu):
+            continue
+        if _class_is_blocked(info.class_name):
+            continue
         if not info.title or not info.title.strip():
             continue
         if info.title.casefold() in ignored:
-            continue
-        if info.class_name in _SHELL_CLASSES:
-            continue
-        if info.rect.width < min_width or info.rect.height < min_height:
             continue
         result.append(info)
     return result
@@ -227,11 +297,23 @@ class Win32WindowApi:
         )
 
     def attach_above(self, our_hwnd: int, target_hwnd: int) -> None:
+        """Вставить наше окно в z-порядке непосредственно над целью.
+
+        ``SetWindowPos(our, target)`` ставит нас *под* target (hWndInsertAfter).
+        Нужно встать после текущего соседа сверху у цели.
+        """
         if sys.platform != "win32" or not our_hwnd or not target_hwnd:
             return
-        ctypes.windll.user32.SetWindowPos(
+        user32 = ctypes.windll.user32
+        if not user32.IsWindow(target_hwnd):
+            return
+        prev = int(user32.GetWindow(target_hwnd, GW_HWNDPREV) or 0)
+        if prev == our_hwnd:
+            return
+        insert_after = prev if prev else HWND_TOP
+        user32.SetWindowPos(
             our_hwnd,
-            target_hwnd,
+            insert_after,
             0,
             0,
             0,
@@ -253,6 +335,34 @@ class Win32WindowApi:
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
+
+    def window_from_point(self, x: int, y: int) -> int:
+        if sys.platform != "win32":
+            return 0
+        return int(
+            ctypes.windll.user32.WindowFromPoint(wintypes.POINT(int(x), int(y))) or 0
+        )
+
+    def is_window(self, hwnd: int) -> bool:
+        if sys.platform != "win32" or not hwnd:
+            return False
+        return bool(ctypes.windll.user32.IsWindow(hwnd))
+
+    def is_our_window(self, hwnd: int, our_hwnd: int) -> bool:
+        if not hwnd or not our_hwnd:
+            return False
+        if hwnd == our_hwnd:
+            return True
+        if sys.platform != "win32":
+            return False
+        root = int(ctypes.windll.user32.GetAncestor(hwnd, GA_ROOT) or 0)
+        return root == our_hwnd
+
+    def is_immediately_above(self, our_hwnd: int, target_hwnd: int) -> bool:
+        if sys.platform != "win32" or not our_hwnd or not target_hwnd:
+            return False
+        below = int(ctypes.windll.user32.GetWindow(our_hwnd, GW_HWNDNEXT) or 0)
+        return below == target_hwnd
 
     def find_desktop_hwnd(self) -> int | None:
         if sys.platform != "win32":
@@ -288,36 +398,50 @@ class Win32WindowApi:
 
     def _read_info(self, hwnd: int, fg: int) -> WindowInfo | None:
         user32 = ctypes.windll.user32
-        if not user32.IsWindowVisible(hwnd):
-            return None
-        if user32.IsIconic(hwnd):
+        if not user32.IsWindow(hwnd):
             return None
         if self._is_our_process(hwnd):
             return None
+        visible = bool(user32.IsWindowVisible(hwnd))
+        iconic = bool(user32.IsIconic(hwnd))
+        owner = int(user32.GetWindow(hwnd, GW_OWNER) or 0)
         ex = self._get_long(hwnd, GWL_EXSTYLE)
-        if ex & WS_EX_TOOLWINDOW:
-            return None
+        style = self._get_long(hwnd, GWL_STYLE)
         title = self._window_text(hwnd)
-        if not title.strip():
-            return None
         class_name = self._class_name(hwnd)
-        if class_name in _SHELL_CLASSES:
-            return None
         rect = self._window_rect(hwnd)
         if rect is None:
             return None
-        style = self._get_long(hwnd, GWL_STYLE)
-        has_caption = bool(style & WS_CAPTION)
-        client_top = self._client_top_screen(hwnd)
+        screen = self._virtual_screen_rect()
+        intersects = screen is None or _rects_intersect(rect, screen)
         return WindowInfo(
             hwnd=hwnd,
             title=title,
             class_name=class_name,
             rect=rect,
             is_foreground=(hwnd == fg),
-            has_caption=has_caption,
-            client_top_screen=client_top,
+            has_caption=bool(style & WS_CAPTION),
+            client_top_screen=self._client_top_screen(hwnd),
+            visible=visible,
+            iconic=iconic,
+            has_owner=owner != 0,
+            is_tool_window=bool(ex & WS_EX_TOOLWINDOW),
+            has_sysmenu=bool(style & WS_SYSMENU),
+            intersects_screen=intersects,
         )
+
+    @staticmethod
+    def _virtual_screen_rect() -> Rect | None:
+        if sys.platform != "win32":
+            return None
+        user32 = ctypes.windll.user32
+        left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+        top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+        width = int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN))
+        height = int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN))
+        if width <= 0 or height <= 0:
+            return None
+        return Rect(left, top, left + width, top + height)
 
     def _is_our_process(self, hwnd: int) -> bool:
         pid = wintypes.DWORD()
@@ -431,6 +555,9 @@ class Locomotion(LocomotionDriver):
         self._attached_hwnd: int | None = None
         self._window_offset_x = 0.0
         self._anim = "walk"
+        self._attach_attempts = 0
+        self._failed_attach_hwnds: set[int] = set()
+        self._attach_verify_left: int | None = None
 
     @property
     def state(self) -> LocomotionState:
@@ -462,6 +589,9 @@ class Locomotion(LocomotionDriver):
         self._attached_hwnd = None
         self._flight_target_hwnd = None
         self._flight_to_desktop = False
+        self._attach_verify_left = None
+        self._attach_attempts = 0
+        self._failed_attach_hwnds.clear()
         self._state = LocomotionState.ON_DESKTOP
         self._anim = "walk"
         self._stay_left = self._roll_stay(
@@ -536,22 +666,42 @@ class Locomotion(LocomotionDriver):
         if self._stay_left <= 0:
             self._begin_takeoff(to_window=True)
 
+    def _max_attach_attempts(self) -> int:
+        return int(getattr(self._cfg, "max_attach_attempts", 3))
+
     def _begin_takeoff(self, *, to_window: bool) -> None:
         self._state = LocomotionState.TAKEOFF
         self._anim = "fly"
         self._phase_t = 0.0
         self._takeoff_from_y = self._y
         self._attached_hwnd = None
+        self._attach_verify_left = None
         target_hwnd: int | None = None
         tx, ty = self._x, self._desktop_y()
         if to_window:
+            if self._attach_attempts >= self._max_attach_attempts():
+                # Лимит неудачных посадок — только ходьба по столу
+                self._state = LocomotionState.ON_DESKTOP
+                self._anim = "walk"
+                self._attach_attempts = 0
+                self._failed_attach_hwnds.clear()
+                self._stay_left = self._roll_stay(
+                    getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
+                )
+                our = self._our_hwnd_getter()
+                if our:
+                    self._api.detach_to_desktop(our)
+                return
             pick = self._pick_window_target()
             if pick is not None:
                 target_hwnd, tx, ty = pick
+                self._attach_attempts += 1
             else:
                 # Некуда лететь — остаёмся на столе
                 self._state = LocomotionState.ON_DESKTOP
                 self._anim = "walk"
+                self._attach_attempts = 0
+                self._failed_attach_hwnds.clear()
                 self._stay_left = self._roll_stay(
                     getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
                 )
@@ -561,6 +711,8 @@ class Locomotion(LocomotionDriver):
             tx = self._clamp_desktop_x(self._x)
             ty = self._desktop_y()
             self._flight_to_desktop = True
+            self._attach_attempts = 0
+            self._failed_attach_hwnds.clear()
         self._flight_target_hwnd = target_hwnd
         self._flight_x0 = self._x
         self._flight_y0 = self._y
@@ -584,6 +736,7 @@ class Locomotion(LocomotionDriver):
             min_height=int(getattr(self._cfg, "min_window_height", 160)),
             ignore_titles=list(getattr(self._cfg, "ignore_titles", [])),
             our_hwnd=our or None,
+            exclude_hwnds=list(self._failed_attach_hwnds),
         )
         usable: list[tuple[WindowInfo, Rect]] = []
         for info in cands:
@@ -635,7 +788,14 @@ class Locomotion(LocomotionDriver):
             if our:
                 self._api.detach_to_desktop(our)
         else:
-            self._attached_hwnd = self._flight_target_hwnd
+            target = self._flight_target_hwnd
+            if not self._api.is_window(target):
+                self._attached_hwnd = None
+                our = self._our_hwnd_getter()
+                if our:
+                    self._api.detach_to_desktop(our)
+                return
+            self._attached_hwnd = target
             our = self._our_hwnd_getter()
             if our and self._attached_hwnd:
                 self._api.attach_above(our, self._attached_hwnd)
@@ -649,7 +809,7 @@ class Locomotion(LocomotionDriver):
         self._anim = "land"
         self._phase_t += dt
         if self._attached_hwnd is not None:
-            if not self._sync_to_window():
+            if not self._api.is_window(self._attached_hwnd) or not self._sync_to_window():
                 self._begin_takeoff(to_window=False)
                 return
             our = self._our_hwnd_getter()
@@ -660,6 +820,8 @@ class Locomotion(LocomotionDriver):
                 self._state = LocomotionState.ON_DESKTOP
                 self._anim = "walk"
                 self._y = self._desktop_y()
+                self._attach_attempts = 0
+                self._failed_attach_hwnds.clear()
                 self._stay_left = self._roll_stay(
                     getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
                 )
@@ -669,6 +831,7 @@ class Locomotion(LocomotionDriver):
             else:
                 self._state = LocomotionState.ON_WINDOW
                 self._anim = "walk"
+                self._attach_verify_left = _ATTACH_VERIFY_TICKS
                 speed = float(getattr(self._cfg, "window_speed_px_s", 22))
                 self._vx = abs(speed) * (1 if self._facing >= 0 else -1)
                 self._stay_left = self._roll_stay(
@@ -676,12 +839,22 @@ class Locomotion(LocomotionDriver):
                 )
 
     def _step_on_window(self, dt: float) -> None:
-        if self._attached_hwnd is None or not self._sync_to_window():
+        if self._attached_hwnd is None or not self._api.is_window(self._attached_hwnd):
+            self._begin_takeoff(to_window=False)
+            return
+        if not self._sync_to_window():
             self._begin_takeoff(to_window=False)
             return
         our = self._our_hwnd_getter()
         if our:
             self._api.attach_above(our, self._attached_hwnd)
+
+        if self._attach_verify_left is not None:
+            self._attach_verify_left -= 1
+            if self._attach_verify_left <= 0:
+                self._attach_verify_left = None
+                if not self._verify_attach_visible():
+                    return
 
         info = self._api.refresh_window(self._attached_hwnd)
         if info is None:
@@ -716,14 +889,69 @@ class Locomotion(LocomotionDriver):
         self._stay_left -= dt
         if self._stay_left <= 0:
             # Улететь на стол или на другое окно
+            self._attach_attempts = 0
+            self._failed_attach_hwnds.clear()
             go_desktop = self._rng.random() < 0.45
             self._begin_takeoff(to_window=not go_desktop)
+
+    def _verify_attach_visible(self) -> bool:
+        """True, если мы над целью в z-порядке; иначе откат на стол/другое окно.
+
+        ``WindowFromPoint`` по центру спрайта дополнительно логируется, но сам по себе
+        ненадёжен: прозрачные пиксели спрайта пробиваются до дочернего рендера цели.
+        Критерий успеха — цель непосредственно под нами (``GetWindow`` / GW_HWNDNEXT).
+        """
+        our = self._our_hwnd_getter()
+        failed = self._attached_hwnd
+        if not our or failed is None:
+            return True
+        cx = int(self._x + self._pet_w / 2)
+        cy = int(self._y + self._pet_h / 2)
+        at = self._api.window_from_point(cx, cy)
+        z_ok = self._api.is_immediately_above(our, failed)
+        point_ok = self._api.is_our_window(at, our)
+        if z_ok:
+            if not point_ok:
+                logger.debug(
+                    "посадка ок по z-порядку, но в точке (%s,%s) hwnd=%s (прозрачность?)",
+                    cx,
+                    cy,
+                    at,
+                )
+            self._attach_attempts = 0
+            self._failed_attach_hwnds.clear()
+            return True
+        logger.debug(
+            "посадка неудачна: z-порядок сбит, в точке (%s,%s) hwnd=%s, цель=%s — откат",
+            cx,
+            cy,
+            at,
+            failed,
+        )
+        self._failed_attach_hwnds.add(failed)
+        self._attached_hwnd = None
+        self._attach_verify_left = None
+        self._api.detach_to_desktop(our)
+        # На стол, затем снова выбрать другое окно (с учётом лимита попыток)
+        self._y = self._desktop_y()
+        self._x = self._clamp_desktop_x(self._x)
+        self._begin_takeoff(to_window=True)
+        return False
 
     def _sync_to_window(self) -> bool:
         """Пересчитать позицию по текущему rect цели. False — окно пропало."""
         assert self._attached_hwnd is not None
+        if not self._api.is_window(self._attached_hwnd):
+            self._attached_hwnd = None
+            return False
         info = self._api.refresh_window(self._attached_hwnd)
         if info is None:
+            self._attached_hwnd = None
+            return False
+        if not info.visible or info.iconic:
+            self._attached_hwnd = None
+            return False
+        if not info.intersects_screen:
             self._attached_hwnd = None
             return False
         if info.rect.width <= 0 or info.rect.height <= 0:
