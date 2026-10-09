@@ -17,6 +17,12 @@ tick:
   brain_interval_sec: 120
   animation_fps: 8
 
+bubble:
+  ttl_sec: 5          # сколько секунд висит реплика
+  max_width: 260      # максимальная ширина облачка, px
+  offset_px: 14       # отступ от питомца и внутренний padding текста
+  font_pt: 10         # размер шрифта реплики
+
 needs:
   start:
     hunger: 40
@@ -28,9 +34,14 @@ needs:
     energy: 0.5
     mood: 0.3
     attention: 1.0
+  event_cooldown_sec: 300   # минимум секунд между одинаковыми событиями потребностей
+  restore_per_minute:
+    energy: 3.0             # рост энергии во сне
   thresholds:
     sleep_energy_below: 20
     complain_hunger_above: 70
+    bored_attention_above: 80  # attention выше → событие bored
+    wake_energy_above: 35      # energy выше → выход из сна в idle
 
 llm:
   base_url: https://api.deepseek.com

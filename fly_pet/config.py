@@ -115,11 +115,23 @@ class TickConfig:
 
 
 @dataclass(frozen=True)
+class BubbleConfig:
+    ttl_sec: float
+    max_width: int
+    offset_px: int
+    font_pt: int
+
+
+@dataclass(frozen=True)
 class NeedsConfig:
     start: dict[str, float]
     decay_per_minute: dict[str, float]
     sleep_energy_below: float
     complain_hunger_above: float
+    bored_attention_above: float
+    wake_energy_above: float
+    event_cooldown_sec: float
+    restore_per_minute: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -168,6 +180,7 @@ class Config:
     app: AppConfig
     window: WindowConfig
     tick: TickConfig
+    bubble: BubbleConfig
     needs: NeedsConfig
     llm: LlmConfig
     safety: SafetyConfig
@@ -204,6 +217,8 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
     feeding_raw = _require_dict(window_raw.get("feeding_point"), "window.feeding_point")
     thresholds = _require_dict(needs_raw.get("thresholds"), "needs.thresholds")
     need_keys = ("hunger", "energy", "mood", "attention")
+    bubble_raw = _require_dict(raw.get("bubble"), "bubble")
+    restore_raw = _require_dict(needs_raw.get("restore_per_minute"), "needs.restore_per_minute")
 
     app = AppConfig(
         locale=_as_str(app_raw.get("locale"), "app.locale"),
@@ -234,6 +249,13 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         animation_fps=_as_int(tick_raw.get("animation_fps"), "tick.animation_fps"),
     )
 
+    bubble = BubbleConfig(
+        ttl_sec=_as_float(bubble_raw.get("ttl_sec"), "bubble.ttl_sec"),
+        max_width=_as_int(bubble_raw.get("max_width"), "bubble.max_width"),
+        offset_px=_as_int(bubble_raw.get("offset_px"), "bubble.offset_px"),
+        font_pt=_as_int(bubble_raw.get("font_pt"), "bubble.font_pt"),
+    )
+
     needs = NeedsConfig(
         start=_parse_needs_map(needs_raw.get("start"), "needs.start", need_keys),
         decay_per_minute=_parse_needs_map(
@@ -246,6 +268,22 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
             thresholds.get("complain_hunger_above"),
             "needs.thresholds.complain_hunger_above",
         ),
+        bored_attention_above=_as_float(
+            thresholds.get("bored_attention_above"),
+            "needs.thresholds.bored_attention_above",
+        ),
+        wake_energy_above=_as_float(
+            thresholds.get("wake_energy_above"),
+            "needs.thresholds.wake_energy_above",
+        ),
+        event_cooldown_sec=_as_float(
+            needs_raw.get("event_cooldown_sec"), "needs.event_cooldown_sec"
+        ),
+        restore_per_minute={
+            "energy": _as_float(
+                restore_raw.get("energy"), "needs.restore_per_minute.energy"
+            ),
+        },
     )
 
     llm = LlmConfig(
@@ -307,6 +345,7 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         app=app,
         window=window,
         tick=tick,
+        bubble=bubble,
         needs=needs,
         llm=llm,
         safety=safety,

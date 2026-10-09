@@ -3,33 +3,87 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from fly_pet.animation import load_frames
 from fly_pet.config import Config, load_config
 from fly_pet.logging_setup import setup_logging
+from fly_pet.needs import Needs
+from fly_pet.phrases import pick
 from fly_pet.state import StateStore
 from fly_pet.window import FlyWindow
+
+_SAVE_INTERVAL_SEC = 60.0
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _mode_to_anim(mode: str) -> str:
+    if mode == "eat":
+        return "chew"
+    return mode if mode in {"idle", "walk", "sleep"} else "idle"
+
+
 def build_app(config: Config, state_store: StateStore) -> QApplication:
-    """Собирает QApplication, загружает кадры и показывает FlyWindow."""
+    """Собирает QApplication, таймеры анимации/потребностей и показывает FlyWindow."""
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
 
     frames = load_frames(_repo_root())
     state = state_store.load()
+    # Стартовые needs из конфига, если state ещё дефолтный и файла не было — уже в state;
+    # не перетираем сохранённые значения.
     window = FlyWindow(config, state_store, state, frames)
+    needs = Needs(state.needs, config.needs, mode=state.mode)
+    if needs.mode != state.mode:
+        state.mode = needs.mode
+        window.set_state(_mode_to_anim(needs.mode))
+
+    last_tick = time.monotonic()
+    last_save = 0.0  # первый тик сохранит сразу
+
+    def on_needs_tick() -> None:
+        nonlocal last_tick, last_save
+        now = time.monotonic()
+        dt = now - last_tick
+        last_tick = now
+        events = needs.tick(dt)
+        state.needs = needs.snapshot()
+        if needs.mode != state.mode:
+            state.mode = needs.mode
+            window.set_state(_mode_to_anim(needs.mode))
+        for event in events:
+            phrase = pick(event.name)
+            if phrase:
+                window.say(phrase)
+        if now - last_save >= _SAVE_INTERVAL_SEC:
+            state_store.save(state)
+            last_save = now
+
+    needs_interval_ms = max(1, int(round(config.tick.needs_interval_sec * 1000)))
+    needs_timer = QTimer(app)
+    needs_timer.setInterval(needs_interval_ms)
+    needs_timer.timeout.connect(on_needs_tick)
+    needs_timer.start()
+
     app._fly_window = window  # type: ignore[attr-defined]
+    app._needs = needs  # type: ignore[attr-defined]
+    app._needs_timer = needs_timer  # type: ignore[attr-defined]
+    app._animation_timer = window._timer  # type: ignore[attr-defined]
+    app._on_needs_tick = on_needs_tick  # type: ignore[attr-defined]
     app.aboutToQuit.connect(window.persist_state)
+
     window.show()
+    greeting = pick("greeting")
+    if greeting:
+        window.say(greeting)
     return app
 
 

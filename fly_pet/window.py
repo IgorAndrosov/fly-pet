@@ -12,6 +12,7 @@ from PyQt6.QtGui import QMouseEvent, QPaintEvent, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from fly_pet.animation import AnimationPlayer
+from fly_pet.bubble import SpeechBubble
 
 if TYPE_CHECKING:
     from fly_pet.config import Config
@@ -23,6 +24,13 @@ GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 _MARGIN_PX = 24
+
+_MODE_TO_ANIM = {
+    "idle": "idle",
+    "walk": "walk",
+    "sleep": "sleep",
+    "eat": "chew",
+}
 
 
 class FlyWindow(QWidget):
@@ -42,10 +50,9 @@ class FlyWindow(QWidget):
         self._state = state
         self._player = AnimationPlayer(frames, config.tick.animation_fps)
         mode = state.mode
-        if mode == "eat":
-            self._player.set_state("chew")
-        elif mode in frames:
-            self._player.set_state(mode)
+        anim = _MODE_TO_ANIM.get(mode, "idle")
+        if anim in frames:
+            self._player.set_state(anim)
         else:
             self._player.set_state("idle")
         self._current_frame = self._player.current_frame()
@@ -65,6 +72,9 @@ class FlyWindow(QWidget):
         self.resize(config.window.width, config.window.height)
         self.move(self._resolve_start_pos())
 
+        self._bubble = SpeechBubble(config.bubble)
+        self._bubble.attach_to(self)
+
         interval_ms = max(1, int(round(1000 / config.tick.animation_fps)))
         self._timer = QTimer(self)
         self._timer.setInterval(interval_ms)
@@ -73,9 +83,16 @@ class FlyWindow(QWidget):
 
         self._pending_click_through = bool(config.window.click_through)
 
+    def say(self, text: str, ttl_ms: int | None = None) -> None:
+        """Показать реплику в облачке рядом с питомцем."""
+        self._bubble.say(text, ttl_ms=ttl_ms)
+        if text and text.strip():
+            self._bubble.place_near(self)
+
     def set_state(self, name: str) -> None:
-        """Переключает набор кадров анимации."""
-        self._player.set_state(name)
+        """Переключает набор кадров анимации (mode или имя анимации)."""
+        anim = _MODE_TO_ANIM.get(name, name)
+        self._player.set_state(anim)
         self._current_frame = self._player.current_frame()
         self.update()
 
@@ -103,6 +120,7 @@ class FlyWindow(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
+            self._bubble.follow_anchor()
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -138,6 +156,7 @@ class FlyWindow(QWidget):
         logger.debug("окно восстановлено из свёрнутого состояния (never_minimize)")
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self._bubble.hide()
         self.persist_state()
         super().closeEvent(event)
 
