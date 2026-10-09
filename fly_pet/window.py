@@ -30,12 +30,29 @@ HWND_TOP = 0
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
+GA_PARENT = 1
 GA_ROOT = 2
+GW_HWNDNEXT = 2
+DWMWA_CLOAKED = 14
 _MARGIN_PX = 24
 _DESKTOP_POINT_CLASSES = frozenset(
     {"Progman", "WorkerW", "SHELLDLL_DefView", "SysListView32"}
 )
 _DESKTOP_FOREGROUND_CLASSES = frozenset({"Progman", "WorkerW"})
+# Оболочка над Progman при Show Desktop — не считаем «обычным окном».
+_ZORDER_SKIP_CLASSES = frozenset(
+    {
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "Shell_Flyout",
+        "DV2ControlHost",
+        "NativeHWNDHost",
+        "ForegroundStaging",
+        "ApplicationManager_ImmersiveShellWindow",
+        "EdgeUiInputTopWndClass",
+        "SuspendableDesktopWindow",
+    }
+)
 
 _MODE_TO_ANIM = {
     "idle": "idle",
@@ -107,6 +124,9 @@ class FlyWindow(QWidget):
         self._locomotion: Locomotion | None = None
         self._loco_timer: QTimer | None = None
         self._loco_last_mono: float | None = None
+        self._desktop_adopted = False  # SetParent(Progman) после Show Desktop
+        self._desktop_reassert_logged = False
+        self._desktop_band_denied_logged = False
 
         flags = Qt.WindowType.FramelessWindowHint
         if config.window.tool_window:
@@ -130,7 +150,6 @@ class FlyWindow(QWidget):
         self._timer.start()
 
         self._pending_click_through = bool(config.window.click_through)
-        self._desktop_reassert_logged = False
         self._desktop_reassert_timer: QTimer | None = None
         if config.window.desktop_reassert:
             self._desktop_reassert_timer = QTimer(self)
@@ -145,6 +164,10 @@ class FlyWindow(QWidget):
         self._bubble.say(text, ttl_ms=ttl_ms)
         if text and text.strip():
             self._bubble.place_near(self)
+            self._sync_bubble_desktop_parent()
+            # raise_() в SpeechBubble.say отрабатывает через очередь — повторить после.
+            if self._desktop_adopted:
+                QTimer.singleShot(0, self._sync_bubble_desktop_parent)
 
     def set_user_hidden(self, hidden: bool) -> None:
         """Спрятать/показать по запросу трея (сторож не отменяет)."""
@@ -209,6 +232,9 @@ class FlyWindow(QWidget):
                 self._state.mode = "idle"
             else:
                 self._state.mode = self._locomotion.mode.value
+        # Усыновление Progman'ом ломает z-порядок посадки/полёта — отпустить до move.
+        if self._desktop_adopted and self._locomotion.blocks_desktop_reassert():
+            self._release_desktop_parent()
         if not self._locomotion.is_hold_still():
             self.move(int(round(pose.x)), int(round(pose.y)))
         anim = _MODE_TO_ANIM.get(pose.anim, pose.anim)
@@ -216,6 +242,7 @@ class FlyWindow(QWidget):
         self._sync_anim_fps(anim)
         self._current_frame = self._player.current_frame()
         self._bubble.follow_anchor()
+        self._sync_bubble_desktop_parent()
         self.update()
 
     def _sync_anim_fps(self, anim: str) -> None:
@@ -278,9 +305,23 @@ class FlyWindow(QWidget):
         if self._dragging and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_offset)
             self._bubble.follow_anchor()
+            self._sync_bubble_desktop_parent()
             event.accept()
             return
         super().mouseMoveEvent(event)
+
+    def move(self, *args) -> None:  # type: ignore[override]
+        """Экранные координаты для Qt; при усыновлении Progman'ом — нативный client-pos."""
+        if len(args) == 1 and isinstance(args[0], QPoint):
+            x, y = int(args[0].x()), int(args[0].y())
+        elif len(args) >= 2:
+            x, y = int(args[0]), int(args[1])
+        else:
+            super().move(*args)
+            return
+        super().move(x, y)
+        if self._desktop_adopted:
+            self._sync_adopted_native_pos(x, y)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and self._dragging:
@@ -384,7 +425,7 @@ class FlyWindow(QWidget):
         set_long(hwnd, GWL_EXSTYLE, style)
 
     def _on_desktop_reassert(self) -> None:
-        """Тик сторожа: восстановить видимость и поднять окно над рабочим столом."""
+        """Тик сторожа: видимость + усыновление Progman'ом при Show Desktop."""
         if self._user_hidden:
             return
         if self.isMinimized():
@@ -392,9 +433,25 @@ class FlyWindow(QWidget):
         if not self.isVisible():
             self.show()
 
-        # На чужом окне / в полёте не поднимаем через HWND_TOP.
+        # На чужом окне / в полёте — только отпустить, не усыновлять.
         if self._locomotion is not None and self._locomotion.blocks_desktop_reassert():
+            if self._desktop_adopted:
+                self._release_desktop_parent()
             self._desktop_reassert_logged = False
+            return
+
+        if self._desktop_adopted:
+            if not self._is_adopted_native():
+                self._desktop_adopted = False
+                self._desktop_reassert_logged = False
+                return
+            # Рабочий стол снова «внизу» — вернуть top-level над целью/столом.
+            if not self._is_show_desktop_active():
+                self._release_desktop_parent()
+                self._desktop_reassert_logged = False
+                return
+            # Qt raise_/move облачка может сбросить SetParent — вернуть.
+            self._sync_bubble_desktop_parent()
             return
 
         if not self._is_desktop_on_top():
@@ -403,7 +460,9 @@ class FlyWindow(QWidget):
 
         self._raise_without_activate()
         if not self._desktop_reassert_logged:
-            logger.debug("окно возвращено поверх рабочего стола (desktop_reassert)")
+            logger.debug(
+                "окно усыновлено Progman'ом поверх рабочего стола (desktop_reassert)"
+            )
             self._desktop_reassert_logged = True
 
     def _probe_point(self) -> QPoint:
@@ -461,23 +520,205 @@ class FlyWindow(QWidget):
         fg_class = self._window_class_name(fg)
         return fg_class in _DESKTOP_FOREGROUND_CLASSES
 
-    def _raise_without_activate(self) -> None:
-        """Поднять окно наверх без активации (Win32 SetWindowPos)."""
+    @staticmethod
+    def _progman_hwnd() -> int:
+        if sys.platform != "win32":
+            return 0
+        return int(ctypes.windll.user32.FindWindowW("Progman", None) or 0)
+
+    def _is_adopted_native(self) -> bool:
+        """True, если нативный parent — Progman (после SetParent)."""
+        if sys.platform != "win32":
+            return False
+        hwnd = int(self.winId())
+        progman = self._progman_hwnd()
+        if not hwnd or not progman:
+            return False
+        parent = int(ctypes.windll.user32.GetAncestor(hwnd, GA_PARENT) or 0)
+        return parent == progman
+
+    @staticmethod
+    def _is_window_cloaked(hwnd: int) -> bool:
+        if not hwnd or sys.platform != "win32":
+            return False
+        try:
+            cloaked = ctypes.c_int(0)
+            hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint(DWMWA_CLOAKED),
+                ctypes.byref(cloaked),
+                ctypes.sizeof(cloaked),
+            )
+            return hr == 0 and cloaked.value != 0
+        except (AttributeError, OSError):
+            return False
+
+    def _is_show_desktop_active(self) -> bool:
+        """True, если Progman/WorkerW выше обычных окон (режим Show Desktop)."""
+        if sys.platform != "win32":
+            return False
+        user32 = ctypes.windll.user32
+        our_hwnd = int(self.winId())
+        hwnd = int(user32.GetTopWindow(0) or 0)
+        while hwnd:
+            if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd):
+                cls = self._window_class_name(hwnd)
+                if cls in _DESKTOP_FOREGROUND_CLASSES:
+                    return True
+                if cls in _ZORDER_SKIP_CLASSES or self._is_our_hwnd(hwnd, our_hwnd):
+                    hwnd = int(user32.GetWindow(hwnd, GW_HWNDNEXT) or 0)
+                    continue
+                if self._is_window_cloaked(hwnd):
+                    hwnd = int(user32.GetWindow(hwnd, GW_HWNDNEXT) or 0)
+                    continue
+                return False
+            hwnd = int(user32.GetWindow(hwnd, GW_HWNDNEXT) or 0)
+        return False
+
+    def _sync_adopted_native_pos(self, screen_x: int, screen_y: int) -> None:
+        """Пересчитать экранные координаты в клиентские Progman и MoveWindow."""
+        if sys.platform != "win32":
+            return
+        if not self._is_adopted_native():
+            self._desktop_adopted = False
+            return
+        hwnd = int(self.winId())
+        progman = self._progman_hwnd()
+        if not hwnd or not progman:
+            return
+        user32 = ctypes.windll.user32
+        pt = wintypes.POINT(int(screen_x), int(screen_y))
+        user32.ScreenToClient(progman, ctypes.byref(pt))
+        user32.MoveWindow(
+            hwnd, pt.x, pt.y, int(self.width()), int(self.height()), True
+        )
+
+    def _set_progman_parent(self, hwnd: int, *, adopt: bool) -> None:
+        """Усыновить/отпустить произвольный HWND относительно Progman, сохранив экранный rect."""
+        if sys.platform != "win32" or not hwnd:
+            return
+        progman = self._progman_hwnd()
+        if not progman:
+            return
+        user32 = ctypes.windll.user32
+        parent = int(user32.GetAncestor(hwnd, GA_PARENT) or 0)
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        screen_x, screen_y = int(rect.left), int(rect.top)
+        w = max(1, int(rect.right - rect.left))
+        h = max(1, int(rect.bottom - rect.top))
+        if adopt:
+            if parent == progman:
+                pt = wintypes.POINT(screen_x, screen_y)
+                user32.ScreenToClient(progman, ctypes.byref(pt))
+                user32.MoveWindow(hwnd, pt.x, pt.y, w, h, True)
+                return
+            user32.SetParent(hwnd, progman)
+            pt = wintypes.POINT(screen_x, screen_y)
+            user32.ScreenToClient(progman, ctypes.byref(pt))
+            user32.MoveWindow(hwnd, pt.x, pt.y, w, h, True)
+            return
+        if parent != progman:
+            return
+        user32.SetParent(hwnd, None)
+        user32.MoveWindow(hwnd, screen_x, screen_y, w, h, True)
+
+    def _sync_bubble_desktop_parent(self) -> None:
+        """Облачко — отдельный top-level; при Show Desktop тоже усыновляем Progman'ом."""
+        if sys.platform != "win32" or not self._desktop_adopted:
+            return
+        if not self._bubble.isVisible():
+            return
+        bh = int(self._bubble.winId() or 0)
+        if not bh:
+            return
+        self._set_progman_parent(bh, adopt=True)
+
+    def _adopt_desktop_parent(self) -> None:
+        """SetParent(Progman): муха в полосе рабочего стола после Win+D."""
         if sys.platform != "win32":
             logger.warning(
-                "desktop_reassert/_raise недоступен на платформе %s — пропуск",
+                "desktop_reassert/_adopt недоступен на платформе %s — пропуск",
                 sys.platform,
             )
             return
         hwnd = int(self.winId())
-        if hwnd == 0:
+        progman = self._progman_hwnd()
+        if not hwnd or not progman:
             return
-        ctypes.windll.user32.SetWindowPos(
-            hwnd,
-            HWND_TOP,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        if self._is_adopted_native():
+            self._desktop_adopted = True
+            self._sync_bubble_desktop_parent()
+            return
+
+        # Замер: SetWindowBand(ZBID_DESKTOP) → ERROR_ACCESS_DENIED (5) без uiAccess.
+        if not self._desktop_band_denied_logged:
+            self._try_log_set_window_band_denied(hwnd)
+
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        screen_x, screen_y = int(rect.left), int(rect.top)
+        ctypes.set_last_error(0)
+        self._set_progman_parent(hwnd, adopt=True)
+        err = ctypes.get_last_error()
+        if not self._is_adopted_native():
+            logger.warning(
+                "SetParent(Progman) не усыновил окно (err=%s) — муха может пропасть под столом",
+                err,
+            )
+            return
+        self._desktop_adopted = True
+        # Qt продолжает думать экранными координатами; натив — клиентские.
+        super().move(screen_x, screen_y)
+        self._sync_adopted_native_pos(screen_x, screen_y)
+        self._sync_bubble_desktop_parent()
+
+    def _release_desktop_parent(self) -> None:
+        """SetParent(NULL) и вернуть экранную геометрию."""
+        if sys.platform != "win32":
+            self._desktop_adopted = False
+            return
+        hwnd = int(self.winId())
+        if not hwnd:
+            self._desktop_adopted = False
+            return
+        user32 = ctypes.windll.user32
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        screen_x, screen_y = int(rect.left), int(rect.top)
+        bh = int(self._bubble.winId() or 0)
+        if bh:
+            self._set_progman_parent(bh, adopt=False)
+        if self._is_adopted_native():
+            self._set_progman_parent(hwnd, adopt=False)
+        self._desktop_adopted = False
+        super().move(screen_x, screen_y)
+
+    def _try_log_set_window_band_denied(self, hwnd: int) -> None:
+        """Один раз зафиксировать отказ SetWindowBand (замер: err=5)."""
+        self._desktop_band_denied_logged = True
+        user32 = ctypes.windll.user32
+        if not hasattr(user32, "SetWindowBand"):
+            logger.info("SetWindowBand недоступен в user32 — используем SetParent(Progman)")
+            return
+        fn = user32.SetWindowBand
+        fn.argtypes = [wintypes.HWND, wintypes.HWND, wintypes.DWORD]
+        fn.restype = wintypes.BOOL
+        ctypes.set_last_error(0)
+        ok = bool(fn(hwnd, None, 1))  # ZBID_DESKTOP
+        err = ctypes.get_last_error()
+        if ok:
+            # На этой машине не ожидается; откатим, чтобы не оставлять полосу.
+            fn(hwnd, None, 0)
+            logger.info("SetWindowBand(ZBID_DESKTOP) неожиданно успешен — откатили, выбран SetParent")
+            return
+        logger.info(
+            "SetWindowBand(ZBID_DESKTOP) отказ ok=%s err=%s — выбран SetParent(Progman)",
+            ok,
+            err,
         )
+
+    def _raise_without_activate(self) -> None:
+        """Поднять над рабочим столом: SetParent(Progman), не HWND_TOP / не TOPMOST."""
+        self._adopt_desktop_parent()

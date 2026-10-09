@@ -236,6 +236,41 @@ def test_desktop_reassert_no_raise_when_not_desktop(
     assert calls == []
 
 
+def test_desktop_reassert_releases_when_adopted_and_show_desktop_ends(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del qapp
+    _write_window_settings(tmp_path, {"desktop_reassert": True})
+    win = _make_window(tmp_path)
+    win._desktop_adopted = True
+    releases: list[int] = []
+    monkeypatch.setattr(win, "_is_adopted_native", lambda: True)
+    monkeypatch.setattr(win, "_is_show_desktop_active", lambda: False)
+    monkeypatch.setattr(win, "_release_desktop_parent", lambda: releases.append(1))
+    monkeypatch.setattr(win, "_raise_without_activate", lambda: releases.append(99))
+    win._on_desktop_reassert()
+    assert releases == [1]
+
+
+def test_desktop_reassert_releases_when_blocks_locomotion(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del qapp
+    _write_window_settings(tmp_path, {"desktop_reassert": True})
+    win = _make_window(tmp_path)
+    win._desktop_adopted = True
+
+    class _Loco:
+        def blocks_desktop_reassert(self) -> bool:
+            return True
+
+    win._locomotion = _Loco()  # type: ignore[assignment]
+    releases: list[int] = []
+    monkeypatch.setattr(win, "_release_desktop_parent", lambda: releases.append(1))
+    win._on_desktop_reassert()
+    assert releases == [1]
+
+
 def test_desktop_reassert_restores_minimized(qapp: QApplication, tmp_path: Path) -> None:
     del qapp
     _write_window_settings(
