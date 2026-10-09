@@ -1,8 +1,7 @@
-"""Процедурная отрисовка спрайтов мухи (Pillow). Версия 2 (исправлена геометрия).
+"""Спрайты мухи, версия 3: добавляю кадры полёта (крылья раскрыты, лапки поджаты).
 
-Рисуем в системе координат 64x64, умножая всё на S (суперсэмплинг),
-затем уменьшаем до 64x64 через LANCZOS. Муха смотрит вправо.
-Кадры: idle (2), walk (6), sleep (3), chew (2) + анимированные превью (GIF).
+Рисуется в системе координат 64x64, умножается на S (суперсэмплинг), уменьшается LANCZOS.
+Кадры: idle(2), walk(6), sleep(3), chew(2), fly(4), land(1).
 """
 from __future__ import annotations
 
@@ -11,8 +10,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-S = 4                      # суперсэмплинг
-SIZE = 64                  # итоговый размер кадра
+S = 4
+SIZE = 64
 
 BODY = (44, 46, 58, 255)
 BODY_LIGHT = (104, 108, 126, 255)
@@ -26,13 +25,10 @@ MOUTH = (86, 88, 102, 255)
 
 
 def p(v: float) -> float:
-    """Из координат 64x64 в координаты холста."""
     return v * S
 
 
-def draw_wing(d: ImageDraw.ImageDraw, root: tuple[float, float], length: float,
-              angle_deg: float, width: float, alpha: int, flip: int) -> None:
-    """Каплевидное крыло из точки root под углом к вертикали."""
+def draw_wing(d, root, length, angle_deg, width, alpha, flip):
     rx, ry = root[0] * S, root[1] * S
     length *= S
     width *= S
@@ -50,8 +46,7 @@ def draw_wing(d: ImageDraw.ImageDraw, root: tuple[float, float], length: float,
               outline=(WING_EDGE[0], WING_EDGE[1], WING_EDGE[2], min(255, alpha + 70)))
 
 
-def draw_leg(d: ImageDraw.ImageDraw, x: float, y: float, dx: float, dy: float,
-             bend: float) -> None:
+def draw_leg(d, x, y, dx, dy, bend):
     x0, y0 = p(x), p(y)
     x1, y1 = p(x + dx), p(y + dy)
     knee = ((x0 + x1) / 2 + bend * S * 0.6, (y0 + y1) / 2 - abs(bend) * S * 0.25 + 2 * S)
@@ -61,19 +56,17 @@ def draw_leg(d: ImageDraw.ImageDraw, x: float, y: float, dx: float, dy: float,
 
 def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float = 0.0,
              wing_angle: float = 26.0, wing_alpha: int = 96, wing_len: float = 15.0,
-             head_dy: float = 0.0, chewing: bool = False,
-             eyes_closed: bool = False) -> Image.Image:
+             wing_width: float = 5.4, head_dy: float = 0.0, chewing: bool = False,
+             eyes_closed: bool = False, body_tilt: float = 0.0) -> Image.Image:
     img = Image.new("RGBA", (SIZE * S, SIZE * S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img, "RGBA")
 
-    by = 33 + body_dy                      # центр корпуса по вертикали
-    hx, hy = 47.0, by + head_dy            # центр головы
+    by = 33 + body_dy
+    hx, hy = 47.0, by + head_dy
 
-    # крылья (под корпусом), корень — у передней части груди
     for flip in (1, -1):
-        draw_wing(d, (30.0, by - 4.0), wing_len, wing_angle, 5.4, wing_alpha, flip)
+        draw_wing(d, (30.0, by - 4.0), wing_len, wing_angle, wing_width, wing_alpha, flip)
 
-    # лапки: три пары
     for i, lx in enumerate((20.0, 30.0, 40.0)):
         fwd = math.sin((legs_phase + i * 0.33) * 2 * math.pi)
         for flip in (1, -1):
@@ -82,17 +75,13 @@ def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float
                      dx=flip * (4.5 + 2.0 * abs(fwd)) * leg_spread, dy=reach,
                      bend=flip * (1.0 + 1.6 * fwd))
 
-    # корпус
     d.ellipse([p(14.0), p(by - 9.0), p(46.0), p(by + 9.0)], fill=BODY)
-    # сегменты на спинке
     for x0 in (20.0, 27.0):
         d.arc([p(x0), p(by - 9.5), p(x0 + 16.0), p(by + 9.5)], start=215, end=325,
               fill=BODY_LIGHT, width=int(1.1 * S))
 
-    # голова
     d.ellipse([p(hx - 9.0), p(hy - 8.5), p(hx + 9.0), p(hy + 8.5)], fill=HEAD)
 
-    # глаза
     if eyes_closed:
         d.line([(p(hx + 1.0), p(hy - 1.0)), (p(hx + 8.0), p(hy - 1.0))], fill=EYE,
                width=int(1.4 * S))
@@ -101,7 +90,6 @@ def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float
         d.ellipse([p(hx + 3.0), p(hy - 5.5), p(hx + 6.0), p(hy - 3.0)], fill=EYE_HL)
     d.ellipse([p(hx - 8.5), p(hy - 5.0), p(hx - 1.0), p(hy + 1.5)], fill=(58, 60, 74, 255))
 
-    # хоботок
     d.line([(p(hx + 7.0), p(hy + 4.0)), (p(hx + 12.0), p(hy + 9.0))], fill=LEG,
            width=int(1.1 * S))
     if chewing:
@@ -110,11 +98,14 @@ def draw_fly(*, legs_phase: float = 0.0, leg_spread: float = 1.0, body_dy: float
         d.line([(p(hx + 2.0), p(hy + 12.0)), (p(hx + 7.0), p(hy + 15.0))], fill=MOUTH,
                width=int(1.1 * S))
 
-    return img.resize((SIZE, SIZE), Image.LANCZOS)
+    out = img.resize((SIZE, SIZE), Image.LANCZOS)
+    if body_tilt:
+        out = out.rotate(body_tilt, resample=Image.BICUBIC, expand=False)
+    return out
 
 
-def frames() -> list[tuple[str, Image.Image]]:
-    out: list[tuple[str, Image.Image]] = []
+def frames():
+    out = []
     for i in range(2):
         out.append((f"idle_{i + 1}", draw_fly(
             wing_angle=26.0 + 8.0 * i, wing_alpha=92 + 22 * i, wing_len=15.0 + 1.2 * i,
@@ -132,52 +123,44 @@ def frames() -> list[tuple[str, Image.Image]]:
         out.append((f"chew_{i + 1}", draw_fly(
             body_dy=0.4 * i, wing_angle=16.0, wing_alpha=110, wing_len=12.0,
             head_dy=-0.8 + 1.6 * i, chewing=True)))
+    # полёт: крылья раскрыты широко, лапки поджаты, тело слегка наклонено
+    flight = [
+        # (угол крыльев, прозрачность, длина, ширина, наклон корпуса, подъём)
+        (68.0, 175, 22.0, 8.5, -4.0, -0.6),
+        (92.0, 200, 23.5, 9.5, -1.0, -1.4),
+        (74.0, 175, 22.0, 8.5, 2.0, -0.4),
+        (52.0, 150, 20.0, 7.5, 4.0, -0.9),
+    ]
+    for i, (ang, alpha, ln, wdt, tilt, dy) in enumerate(flight):
+        out.append((f"fly_{i + 1}", draw_fly(
+            leg_spread=0.35, body_dy=dy, wing_angle=ang, wing_alpha=alpha, wing_len=ln,
+            wing_width=wdt, body_tilt=tilt)))
+    # приземление: крылья вверх, лапки выставлены вперёд
+    out.append(("land_1", draw_fly(
+        leg_spread=1.15, body_dy=0.6, wing_angle=38.0, wing_alpha=170, wing_len=18.0,
+        wing_width=7.0, body_tilt=6.0)))
     return out
 
 
-def save_gif(path: Path, images: list[Image.Image], ms: int = 110, scale: int = 4) -> None:
-    """Анимированный GIF из кадров (для просмотра в чате)."""
-    composed = []
-    for im in images:
-        big = im.resize((SIZE * scale, SIZE * scale), Image.NEAREST)
-        bg = Image.new("RGBA", big.size, (236, 236, 236, 255))
-        step = 8 * scale
-        for y in range(0, big.size[1], step):
-            for x in range(0, big.size[0], step):
-                if ((x // step + y // step) % 2) == 0:
-                    bg.paste((214, 214, 214, 255), (x, y, x + step, y + step))
-        bg.alpha_composite(big)
-        composed.append(bg.convert("P", palette=Image.ADAPTIVE, colors=64))
-    composed[0].save(path, save_all=True, append_images=composed[1:], duration=ms, loop=0,
-                     disposal=2)
-
-
 def main() -> None:
-    out = Path(r"C:\Users\igora\AppData\Local\hermes\cache\scratch\fly_sprites")
-    out.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(r"D:\Projects\fly-pet\assets\fly")
+    out_dir.mkdir(parents=True, exist_ok=True)
     fr = frames()
     for name, im in fr:
-        im.save(out / f"{name}.png")
-    print(f"кадров: {len(fr)}")
+        im.save(out_dir / f"{name}.png")
+    print(f"кадров: {len(fr)} -> {out_dir}")
+    print("новые:", ", ".join(n for n, _ in fr if n.startswith(("fly_", "land_"))))
 
-    for name in ("idle", "walk", "sleep", "chew"):
-        group = [im for n, im in fr if n.startswith(name)]
-        save_gif(out / f"_{name}.gif", group, ms=320 if name == "sleep" else 110, scale=4)
-        print("gif:", f"_{name}.gif", len(group), "кадров")
-
-    scale = 4
-    cell = SIZE * scale
-    cols = len(fr)
-    sheet = Image.new("RGBA", (cols * (cell + 6) + 6, cell + 12), (255, 255, 255, 255))
-    for y in range(sheet.height):
-        for x in range(sheet.width):
-            v = 236 if ((x // 12 + y // 12) % 2 == 0) else 212
-            sheet.putpixel((x, y), (v, v, v, 255))
-    for idx, (_, im) in enumerate(fr):
-        sheet.alpha_composite(im.resize((cell, cell), Image.NEAREST),
-                              (6 + idx * (cell + 6), 6))
-    sheet.save(out / "_sheet.png")
-    print("лист:", out / "_sheet.png", sheet.size)
+    scratch = Path(r"C:\Users\igora\AppData\Local\hermes\cache\scratch\fly_sprites")
+    scratch.mkdir(parents=True, exist_ok=True)
+    # превью: только новые кадры, крупно
+    new = [(n, im) for n, im in fr if n.startswith(("fly_", "land_"))]
+    cell = SIZE * 5
+    sheet = Image.new("RGBA", (len(new) * (cell + 8) + 8, cell + 16), (240, 240, 240, 255))
+    for i, (_n, im) in enumerate(new):
+        sheet.alpha_composite(im.resize((cell, cell), Image.NEAREST), (8 + i * (cell + 8), 8))
+    sheet.save(scratch / "flight_preview.png")
+    print("превью:", scratch / "flight_preview.png", sheet.size)
 
 
 if __name__ == "__main__":
