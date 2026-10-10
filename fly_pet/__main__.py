@@ -23,13 +23,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Запустить окно питомца (прозрачный спрайт на рабочем столе).",
     )
+    parser.add_argument(
+        "--demo-eat",
+        action="store_true",
+        help="После старта GUI — демо: создать файл на столе и съесть.",
+    )
     args = parser.parse_args(argv)
 
     # В сборке PyInstaller exe без аргументов сразу открывает GUI.
-    if args.gui or getattr(sys, "frozen", False):
+    if args.gui or args.demo_eat or getattr(sys, "frozen", False):
         from fly_pet.app import run
 
-        return run()
+        return run(demo_eat=bool(args.demo_eat))
 
     py = sys.version_info
     print(

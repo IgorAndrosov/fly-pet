@@ -605,6 +605,8 @@ class Locomotion(LocomotionDriver):
         self._last_pause_groomed = False
         self._last_pause_turned = False
         self._last_pause_turn_delta = 0.0
+        self._directed = False
+        self._arrive_cb: Callable[[], None] | None = None
         self._begin_burst()
 
     @property
@@ -673,6 +675,8 @@ class Locomotion(LocomotionDriver):
         self._prev_window_hwnd = None
         self._flight_target_hwnd = None
         self._flight_to_desktop = False
+        self._directed = False
+        self._arrive_cb = None
         self._attach_verify_left = None
         self._attach_attempts = 0
         self._failed_attach_hwnds.clear()
@@ -691,6 +695,51 @@ class Locomotion(LocomotionDriver):
 
     def set_desktop(self, desktop: Rect) -> None:
         self._desktop = desktop
+
+    def fly_to(
+        self,
+        x: int,
+        y: int,
+        on_arrive: Callable[[], None] | None = None,
+    ) -> None:
+        """Взлёт → полёт по прямой к (x,y) top-left спрайта → посадка → callback.
+
+        По завершении — обычное поведение на столе. Не ломает scare/Show Desktop.
+        """
+        self._paused = False
+        self._hold_still = False
+        self._directed = True
+        self._arrive_cb = on_arrive
+        self._prev_window_hwnd = self._attached_hwnd
+        self._state = LocomotionState.TAKEOFF
+        self._anim = "fly"
+        self._phase_t = 0.0
+        self._takeoff_from_y = self._y
+        self._attached_hwnd = None
+        self._attach_verify_left = None
+        self._flight_to_desktop = True
+        self._flight_target_hwnd = None
+        self._flight_x0 = self._x
+        self._flight_y0 = self._y
+        self._flight_x1 = float(x)
+        self._flight_y1 = float(y)
+        dist = ((self._flight_x1 - self._x) ** 2 + (self._flight_y1 - self._y) ** 2) ** 0.5
+        speed = max(1.0, float(getattr(self._cfg, "fly_speed_px_s", 520)))
+        self._flight_dur = max(0.05, dist / speed)
+        self._heading_deg = _norm_angle_deg(
+            math.degrees(math.atan2(self._flight_y1 - self._y, self._flight_x1 - self._x))
+        )
+        self._sync_facing_from_heading()
+        our = self._our_hwnd_getter()
+        if our:
+            self._api.detach_to_desktop(our)
+        logger.info(
+            "лететь в точку (%.0f, %.0f) → (%.0f, %.0f)",
+            self._x,
+            self._y,
+            self._flight_x1,
+            self._flight_y1,
+        )
 
     def step(self, dt_sec: float) -> LocomotionPose:
         if self._paused or self._hold_still or dt_sec <= 0:
@@ -1221,13 +1270,24 @@ class Locomotion(LocomotionDriver):
                 # Смена режима — только здесь, на посадке
                 self._mode = LocomotionMode.DESKTOP
                 self._state = LocomotionState.ON_DESKTOP
-                self._x, self._y = self._clamp_desktop_xy(self._x, self._y)
+                if self._directed:
+                    # Наведение: не уводить от иконки жёстким clamp walk-bounds
+                    self._x = float(self._flight_x1)
+                    self._y = float(self._flight_y1)
+                else:
+                    self._x, self._y = self._clamp_desktop_xy(self._x, self._y)
                 self._attach_attempts = 0
                 self._failed_attach_hwnds.clear()
                 self._stay_left = self._roll_stay(
                     getattr(self._cfg, "desktop_stay_sec", (8.0, 25.0))
                 )
+                arrive = self._arrive_cb if self._directed else None
+                self._directed = False
+                self._arrive_cb = None
                 self._begin_burst()
+                if arrive is not None:
+                    logger.info("прилетел в (%.0f, %.0f)", self._x, self._y)
+                    arrive()
             else:
                 self._mode = LocomotionMode.WINDOW
                 self._state = LocomotionState.ON_WINDOW

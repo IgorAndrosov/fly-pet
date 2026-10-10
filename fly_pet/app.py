@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import QApplication
 from fly_pet.animation import load_frames
 from fly_pet.brain import BrainClient, BrainResult
 from fly_pet.config import Config, load_config
+from fly_pet.eat import wire_demo_eat
 from fly_pet.envload import load_env_file
 from fly_pet.locomotion import Locomotion, Rect, Win32WindowApi
 from fly_pet.logging_setup import setup_logging
@@ -49,7 +50,12 @@ def _desktop_rect() -> Rect:
     return Rect(int(geo.x()), int(geo.y()), int(geo.x() + geo.width()), int(geo.y() + geo.height()))
 
 
-def build_app(config: Config, state_store: StateStore) -> QApplication:
+def build_app(
+    config: Config,
+    state_store: StateStore,
+    *,
+    demo_eat: bool = False,
+) -> QApplication:
     """Собирает QApplication, таймеры анимации/потребностей и показывает FlyWindow."""
     app = QApplication.instance()
     if app is None:
@@ -197,11 +203,20 @@ def build_app(config: Config, state_store: StateStore) -> QApplication:
         window.hide()
         app.quit()
 
+    demo = wire_demo_eat(
+        window=window,
+        state=state,
+        state_store=state_store,
+        data_dir=config.data_dir,
+        parent=window,
+    )
+
     tray = TrayController(
         window=window,
         needs=needs,
         state=state,
         on_quit=quit_app,
+        on_demo_eat=demo.start,
         parent=window,
     )
 
@@ -215,6 +230,7 @@ def build_app(config: Config, state_store: StateStore) -> QApplication:
     app._brain_client = brain_client  # type: ignore[attr-defined]
     app._animation_timer = window._timer  # type: ignore[attr-defined]
     app._tray = tray  # type: ignore[attr-defined]
+    app._demo_eat = demo  # type: ignore[attr-defined]
     app._quit_app = quit_app  # type: ignore[attr-defined]
     app.aboutToQuit.connect(window.persist_state)
 
@@ -222,15 +238,17 @@ def build_app(config: Config, state_store: StateStore) -> QApplication:
     greeting = pick("greeting")
     if greeting:
         window.say(greeting)
+    if demo_eat:
+        QTimer.singleShot(800, demo.start)
     return app
 
 
-def run(config: Config | None = None) -> int:
+def run(config: Config | None = None, *, demo_eat: bool = False) -> int:
     """Загружает конфиг/состояние, показывает окно и крутит цикл событий."""
     cfg = config if config is not None else load_config()
     load_env_file(cfg.paths.hermes_env)
     setup_logging(cfg.data_dir)
     store = StateStore(cfg.data_dir)
     print(f"питомец запущен, данные: {cfg.data_dir}")
-    app = build_app(cfg, store)
+    app = build_app(cfg, store, demo_eat=demo_eat)
     return int(app.exec())

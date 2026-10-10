@@ -49,6 +49,7 @@ def default_stats() -> dict[str, Any]:
         "llm_calls": 0,
         "llm_failures": 0,
         "llm_last_provider": None,
+        "eaten": 0,
     }
 
 

@@ -33,6 +33,7 @@ class TrayController(QObject):
         needs: Needs,
         state: PetState,
         on_quit: Callable[[], None],
+        on_demo_eat: Callable[[], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -40,6 +41,7 @@ class TrayController(QObject):
         self._needs = needs
         self._state = state
         self._on_quit = on_quit
+        self._on_demo_eat = on_demo_eat
         self._tray: QSystemTrayIcon | None = None
         self._act_hide: QAction | None = None
         self._act_hold: QAction | None = None
@@ -75,6 +77,8 @@ class TrayController(QObject):
         self._act_no_scare.triggered.connect(self._toggle_scare)
 
         menu.addSeparator()
+        act_demo = menu.addAction("Тест: создать файл и съесть")
+        act_demo.triggered.connect(self._demo_eat)
         act_report = menu.addAction("Отчёт о работе")
         act_report.triggered.connect(self._report)
         act_about = menu.addAction("О программе")
@@ -127,6 +131,10 @@ class TrayController(QObject):
             return
         # Галочка «Не бояться» = scare выключен
         loco.set_scare_cursor(not self._act_no_scare.isChecked())
+
+    def _demo_eat(self) -> None:
+        if self._on_demo_eat is not None:
+            self._on_demo_eat()
 
     def _report(self) -> None:
         phrase = pick("report")

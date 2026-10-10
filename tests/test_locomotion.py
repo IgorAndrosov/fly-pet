@@ -951,3 +951,33 @@ def test_hold_still_freezes() -> None:
     loco.step(0.2)
     assert loco._x == x0 and loco._y == y0
     assert loco.pose.anim == "idle"
+
+
+def test_fly_to_arrives_and_calls_callback() -> None:
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            fly_speed_px_s=2000.0,
+            desktop_stay_sec=(1000.0, 1000.0),
+            seed=11,
+        ),
+        seed=11,
+    )
+    arrived: list[tuple[float, float]] = []
+
+    def on_arrive() -> None:
+        arrived.append((loco._x, loco._y))
+
+    loco.set_hold_still(True)
+    loco.fly_to(400, 300, on_arrive=on_arrive)
+    assert not loco.is_hold_still()
+    assert loco.state == LocomotionState.TAKEOFF
+    # takeoff + flight + landing
+    for _ in range(80):
+        loco.step(0.05)
+        if arrived:
+            break
+    assert arrived
+    assert loco.state == LocomotionState.ON_DESKTOP
+    assert loco._x == pytest.approx(400.0, abs=1.0)
+    assert loco._y == pytest.approx(300.0, abs=1.0)
+    assert loco.mode == LocomotionMode.DESKTOP
