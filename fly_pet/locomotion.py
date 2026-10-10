@@ -354,10 +354,16 @@ class Win32WindowApi:
     def detach_to_desktop(self, our_hwnd: int) -> None:
         if sys.platform != "win32" or not our_hwnd:
             return
+        user32 = ctypes.windll.user32
+        progman = int(user32.FindWindowW("Progman", None) or 0)
+        parent = int(user32.GetAncestor(our_hwnd, GA_PARENT) or 0)
+        if progman and parent == progman:
+            # Уже усыновлены Progman'ом (Show Desktop) — не срывать SetParent.
+            return
         self.release_desktop_parent(our_hwnd)
         desktop = self.find_desktop_hwnd()
         insert_after = desktop if desktop else HWND_TOP
-        ctypes.windll.user32.SetWindowPos(
+        user32.SetWindowPos(
             our_hwnd,
             insert_after,
             0,
