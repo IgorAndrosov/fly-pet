@@ -67,11 +67,12 @@
   `LVM_GETITEMPOSITION` через память explorer'а); при любом сбое — тихий откат на фиксированную точку
   из конфига, настоящая иконка исчезает в тот же момент.
 - Позиции иконок читаются в режиме, не требующем прав администратора.
-- После Show Desktop (`Win+D`) муха остаётся видимой через **`SetParent(hwnd, Progman)`** (усыновление
-  рабочим столом), а не через `SetWindowPos(HWND_TOP)` и не через `SetWindowBand`: на Win11 26200
-  обычный `HWND_TOP` оставляет окно под `Progman`, а `SetWindowBand(ZBID_DESKTOP)` даёт
-  `ERROR_ACCESS_DENIED` (5) без uiAccess. Сторож `desktop_reassert` по-прежнему детектит накрытие
-  столом; усыновление/отпускание — только на переходе. Постоянный topmost запрещён.
+- После Show Desktop (`Win+D`) муха остаётся видимой через **временный `SetWindowPos(HWND_TOPMOST)`**
+  (с корректными ctypes-прототипами), а не через `SetParent(Progman)` и не через `SetWindowBand`:
+  `SetParent` на Qt-окне убивает отрисовку безвозвратно; `SetWindowBand(ZBID_DESKTOP)` даёт
+  `ERROR_ACCESS_DENIED` (5) без uiAccess; обычный `HWND_TOP` оставляет окно под `Progman`.
+  Сторож `desktop_reassert` детектит накрытие столом; topmost включается/снимается только на
+  переходе (гистерезис 2/3 тика). Постоянный `WS_EX_TOPMOST` / `always_on_top` запрещён.
 
 ## Этап 2 (отложено)
 - Спайковая connectome-модель **мозга дрозофилы** (аналог `abgnydn/webgpu-fly`: реальные веса FlyWire,

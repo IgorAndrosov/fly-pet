@@ -31,7 +31,6 @@ GWL_EXSTYLE = -20
 GW_OWNER = 4
 GW_HWNDNEXT = 2
 GW_HWNDPREV = 3
-GA_PARENT = 1
 GA_ROOT = 2
 WS_CAPTION = 0x00C00000
 WS_SYSMENU = 0x00080000
@@ -336,7 +335,6 @@ class Win32WindowApi:
         user32 = ctypes.windll.user32
         if not user32.IsWindow(target_hwnd):
             return
-        self.release_desktop_parent(our_hwnd)
         prev = int(user32.GetWindow(target_hwnd, GW_HWNDPREV) or 0)
         if prev == our_hwnd:
             return
@@ -355,12 +353,6 @@ class Win32WindowApi:
         if sys.platform != "win32" or not our_hwnd:
             return
         user32 = ctypes.windll.user32
-        progman = int(user32.FindWindowW("Progman", None) or 0)
-        parent = int(user32.GetAncestor(our_hwnd, GA_PARENT) or 0)
-        if progman and parent == progman:
-            # Уже усыновлены Progman'ом (Show Desktop) — не срывать SetParent.
-            return
-        self.release_desktop_parent(our_hwnd)
         desktop = self.find_desktop_hwnd()
         insert_after = desktop if desktop else HWND_TOP
         user32.SetWindowPos(
@@ -371,29 +363,6 @@ class Win32WindowApi:
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        )
-
-    def release_desktop_parent(self, our_hwnd: int) -> None:
-        """Если окно усыновлено Progman'ом — SetParent(NULL) с сохранением экрана."""
-        if sys.platform != "win32" or not our_hwnd:
-            return
-        user32 = ctypes.windll.user32
-        progman = int(user32.FindWindowW("Progman", None) or 0)
-        if not progman:
-            return
-        parent = int(user32.GetAncestor(our_hwnd, GA_PARENT) or 0)
-        if parent != progman:
-            return
-        rect = wintypes.RECT()
-        user32.GetWindowRect(our_hwnd, ctypes.byref(rect))
-        user32.SetParent(our_hwnd, None)
-        user32.MoveWindow(
-            our_hwnd,
-            int(rect.left),
-            int(rect.top),
-            int(rect.right - rect.left),
-            int(rect.bottom - rect.top),
-            True,
         )
 
     def window_from_point(self, x: int, y: int) -> int:

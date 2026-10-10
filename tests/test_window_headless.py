@@ -239,54 +239,46 @@ def test_desktop_reassert_no_raise_when_not_desktop(
     assert calls == []
 
 
-def test_desktop_reassert_releases_when_adopted_and_show_desktop_ends(
+def test_desktop_reassert_clears_topmost_when_show_desktop_ends(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del qapp
     _write_window_settings(tmp_path, {"desktop_reassert": True})
     win = _make_window(tmp_path)
-    win._desktop_adopted = True
-    win._desktop_native_hwnd = 1
-    releases: list[int] = []
-    monkeypatch.setattr(win, "_is_adopted_native", lambda: True)
+    win._desktop_topmost = True
+    clears: list[int] = []
     monkeypatch.setattr(win, "_is_desktop_on_top", lambda: False)
-    monkeypatch.setattr(
-        win, "_release_desktop_parent", lambda **_kwargs: releases.append(1)
-    )
-    monkeypatch.setattr(win, "_raise_without_activate", lambda: releases.append(99))
+    monkeypatch.setattr(win, "_clear_desktop_topmost", lambda: clears.append(1))
+    monkeypatch.setattr(win, "_raise_without_activate", lambda: clears.append(99))
     win._on_desktop_reassert()
     win._on_desktop_reassert()
-    assert releases == []  # hysteresis: нужно 3 подряд
+    assert clears == []  # hysteresis: нужно 3 подряд
     win._on_desktop_reassert()
-    assert releases == [1]
+    assert clears == [1]
 
 
-def test_desktop_reassert_keeps_adopt_when_loco_blocks_but_desktop_covers(
+def test_desktop_reassert_keeps_topmost_when_loco_blocks_but_desktop_covers(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Полёт сам по себе не отпускает Progman — иначе Show Desktop снова прячет муху."""
+    """Полёт сам по себе не снимает topmost — иначе Show Desktop снова прячет муху."""
     del qapp
     _write_window_settings(tmp_path, {"desktop_reassert": True})
     win = _make_window(tmp_path)
-    win._desktop_adopted = True
-    win._desktop_native_hwnd = 1
+    win._desktop_topmost = True
 
     class _Loco:
         def blocks_desktop_reassert(self) -> bool:
             return True
 
     win._locomotion = _Loco()  # type: ignore[assignment]
-    releases: list[int] = []
+    clears: list[int] = []
     monkeypatch.setattr(win, "_is_desktop_on_top", lambda: True)
-    monkeypatch.setattr(win, "_is_adopted_native", lambda: True)
-    monkeypatch.setattr(
-        win, "_release_desktop_parent", lambda **_kwargs: releases.append(1)
-    )
+    monkeypatch.setattr(win, "_clear_desktop_topmost", lambda: clears.append(1))
     win._on_desktop_reassert()
-    assert releases == []
+    assert clears == []
 
 
-def test_desktop_reassert_no_adopt_when_loco_blocks_and_not_desktop(
+def test_desktop_reassert_no_topmost_when_loco_blocks_and_not_desktop(
     qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del qapp
