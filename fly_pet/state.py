@@ -43,8 +43,13 @@ def default_last_action() -> dict[str, Any]:
     return {"name": None, "at": None, "dry_run": True, "ok": None}
 
 
-def default_stats() -> dict[str, int]:
-    return {"actions_run": 0, "llm_calls": 0, "llm_failures": 0}
+def default_stats() -> dict[str, Any]:
+    return {
+        "actions_run": 0,
+        "llm_calls": 0,
+        "llm_failures": 0,
+        "llm_last_provider": None,
+    }
 
 
 @dataclass
@@ -57,7 +62,7 @@ class PetState:
     last_action: dict[str, Any] = field(default_factory=default_last_action)
     last_user_activity_at: str | None = None
     pending_reminder: Any = None
-    stats: dict[str, int] = field(default_factory=default_stats)
+    stats: dict[str, Any] = field(default_factory=default_stats)
     eaten: int = 0
     extras: dict[str, Any] = field(default_factory=dict)
 
@@ -124,7 +129,17 @@ class PetState:
         )
 
         stats_raw = raw.get("stats")
-        stats = default_stats() if not isinstance(stats_raw, dict) else {**default_stats(), **stats_raw}
+        stats = default_stats()
+        if isinstance(stats_raw, dict):
+            stats = {**stats, **stats_raw}
+            for key, value in list(stats.items()):
+                if key == "llm_last_provider":
+                    stats[key] = None if value is None else str(value)
+                else:
+                    try:
+                        stats[key] = int(value)
+                    except (TypeError, ValueError):
+                        stats[key] = 0
 
         mode = raw.get("mode", "idle")
         if mode not in MODES:
@@ -151,7 +166,7 @@ class PetState:
             last_action=last_action,
             last_user_activity_at=raw.get("last_user_activity_at"),
             pending_reminder=raw.get("pending_reminder"),
-            stats={k: int(v) for k, v in stats.items()},
+            stats=stats,
             eaten=eaten,
             extras=extras,
         )

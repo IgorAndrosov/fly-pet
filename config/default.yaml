@@ -46,11 +46,25 @@ needs:
     wake_energy_above: 35      # energy выше → выход из сна в idle
 
 llm:
+  enabled: true
+  providers:
+    - name: local
+      base_url: http://192.168.0.100:1234/v1
+      model: fly-brain
+      timeout_sec: 3
+      api_key_env: null
+    - name: deepseek
+      base_url: https://api.deepseek.com
+      model: deepseek-chat
+      timeout_sec: 30
+      api_key_env: DEEPSEEK_API_KEY
+  max_tokens: 256
+  temperature: 0.4
+  phrase_ttl_sec: 5
+  # Синонимы (обратная совместимость со старым settings.yaml):
   base_url: https://api.deepseek.com
   model: deepseek-chat
   timeout_sec: 30
-  max_tokens: 256
-  temperature: 0.4
 
 safety:
   dry_run: true

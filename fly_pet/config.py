@@ -149,12 +149,25 @@ class NeedsConfig:
 
 
 @dataclass(frozen=True)
-class LlmConfig:
+class LlmProviderConfig:
+    name: str
     base_url: str
     model: str
     timeout_sec: int
+    api_key_env: str | None
+
+
+@dataclass(frozen=True)
+class LlmConfig:
+    enabled: bool
+    providers: list[LlmProviderConfig]
     max_tokens: int
     temperature: float
+    phrase_ttl_sec: float
+    # Синонимы первого/legacy-провайдера (обратная совместимость).
+    base_url: str
+    model: str
+    timeout_sec: int
 
 
 @dataclass(frozen=True)
@@ -254,6 +267,83 @@ def _parse_needs_map(raw: Any, path: str, keys: tuple[str, ...]) -> dict[str, fl
     return result
 
 
+def _parse_provider(raw: Any, path: str) -> LlmProviderConfig:
+    data = _require_dict(raw, path)
+    api_key_env_raw = data.get("api_key_env")
+    if api_key_env_raw is None:
+        api_key_env: str | None = None
+    else:
+        api_key_env = _as_str(api_key_env_raw, f"{path}.api_key_env")
+        if not api_key_env.strip():
+            api_key_env = None
+    return LlmProviderConfig(
+        name=_as_str(data.get("name"), f"{path}.name"),
+        base_url=_as_str(data.get("base_url"), f"{path}.base_url"),
+        model=_as_str(data.get("model"), f"{path}.model"),
+        timeout_sec=_as_int(data.get("timeout_sec"), f"{path}.timeout_sec"),
+        api_key_env=api_key_env,
+    )
+
+
+def _parse_llm(llm_raw: dict[str, Any]) -> LlmConfig:
+    max_tokens = _as_int(llm_raw.get("max_tokens"), "llm.max_tokens")
+    temperature = _as_float(llm_raw.get("temperature"), "llm.temperature")
+
+    enabled_raw = llm_raw.get("enabled", True)
+    if enabled_raw is None:
+        enabled = True
+    else:
+        enabled = _as_bool(enabled_raw, "llm.enabled")
+
+    phrase_raw = llm_raw.get("phrase_ttl_sec", 5)
+    phrase_ttl_sec = _as_float(phrase_raw, "llm.phrase_ttl_sec")
+
+    providers_raw = llm_raw.get("providers")
+    providers: list[LlmProviderConfig] = []
+    if providers_raw is not None:
+        items = _require_list(providers_raw, "llm.providers")
+        if not items:
+            raise ConfigError("llm.providers не должен быть пустым")
+        for i, item in enumerate(items):
+            providers.append(_parse_provider(item, f"llm.providers[{i}]"))
+    else:
+        # Старый формат: один провайдер из base_url/model/timeout_sec.
+        providers.append(
+            LlmProviderConfig(
+                name="deepseek",
+                base_url=_as_str(llm_raw.get("base_url"), "llm.base_url"),
+                model=_as_str(llm_raw.get("model"), "llm.model"),
+                timeout_sec=_as_int(llm_raw.get("timeout_sec"), "llm.timeout_sec"),
+                api_key_env="DEEPSEEK_API_KEY",
+            )
+        )
+
+    # Синонимы: явные legacy-ключи, иначе первый провайдер.
+    if "base_url" in llm_raw and llm_raw["base_url"] is not None:
+        base_url = _as_str(llm_raw.get("base_url"), "llm.base_url")
+    else:
+        base_url = providers[0].base_url
+    if "model" in llm_raw and llm_raw["model"] is not None:
+        model = _as_str(llm_raw.get("model"), "llm.model")
+    else:
+        model = providers[0].model
+    if "timeout_sec" in llm_raw and llm_raw["timeout_sec"] is not None:
+        timeout_sec = _as_int(llm_raw.get("timeout_sec"), "llm.timeout_sec")
+    else:
+        timeout_sec = providers[0].timeout_sec
+
+    return LlmConfig(
+        enabled=enabled,
+        providers=providers,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        phrase_ttl_sec=phrase_ttl_sec,
+        base_url=base_url,
+        model=model,
+        timeout_sec=timeout_sec,
+    )
+
+
 def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
     app_raw = _require_dict(raw.get("app"), "app")
     window_raw = _require_dict(raw.get("window"), "window")
@@ -344,13 +434,7 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
         },
     )
 
-    llm = LlmConfig(
-        base_url=_as_str(llm_raw.get("base_url"), "llm.base_url"),
-        model=_as_str(llm_raw.get("model"), "llm.model"),
-        timeout_sec=_as_int(llm_raw.get("timeout_sec"), "llm.timeout_sec"),
-        max_tokens=_as_int(llm_raw.get("max_tokens"), "llm.max_tokens"),
-        temperature=_as_float(llm_raw.get("temperature"), "llm.temperature"),
-    )
+    llm = _parse_llm(llm_raw)
 
     safety = SafetyConfig(
         dry_run=_as_bool(safety_raw.get("dry_run"), "safety.dry_run"),
