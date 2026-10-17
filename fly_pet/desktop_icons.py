@@ -56,18 +56,30 @@ class _LVITEMW(ctypes.Structure):
 
 
 def ensure_dpi_aware() -> str:
-    """PER_MONITOR_AWARE до координатных вызовов (иначе DPI виртуализирует)."""
+    """DPI до создания окон: per-monitor v2, иначе awareness=2, иначе system."""
     if sys.platform != "win32":
         return "none"
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-        return "per-monitor"
+        set_ctx = ctypes.windll.user32.SetProcessDpiAwarenessContext
+        set_ctx.restype = wintypes.BOOL
+        set_ctx.argtypes = [ctypes.c_void_p]
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4
+        if set_ctx(ctypes.c_void_p(-4)):
+            return "per-monitor-v2"
     except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
+        pass
+    try:
+        hr = int(ctypes.windll.shcore.SetProcessDpiAwareness(2))
+        if hr == 0:
+            return "per-monitor"
+    except Exception:
+        pass
+    try:
+        if ctypes.windll.user32.SetProcessDPIAware():
             return "system"
-        except Exception:
-            return "none"
+    except Exception:
+        return "none"
+    return "none"
 
 
 def user_desktop_path() -> Path:

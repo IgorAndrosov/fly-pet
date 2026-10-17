@@ -11,7 +11,10 @@ from fly_pet.locomotion import (
     title_bar_strip_from_metrics,
 )
 from fly_pet.screens import (
+    MonitorDesc,
+    ScreenDesc,
     ScreenSession,
+    format_monitors_log,
     format_screen_log,
     icon_on_screen,
     pick_screen_rect,
@@ -64,8 +67,9 @@ def test_screen_log_uses_available_geometry() -> None:
     ]
     choice = select_screen(1, screens)
     assert choice.walk == Rect(0, 0, 1920, 1032)
+    assert choice.match == "name"
     assert format_screen_log(choice) == (
-        "мониторов: 2; экран: \\\\.\\DISPLAY1 1920x1080 at (0,0) primary=True; "
+        "монитор 1: \\\\.\\DISPLAY1 (по имени Qt), "
         "область ходьбы: (0,0)-(1920,1032)"
     )
 
@@ -113,6 +117,120 @@ def test_strip_center_inside_but_overlap_below_60_percent() -> None:
     assert not strip_lies_on_screen(thin, screen)
     enough = Rect(-400, 10, 600, 40)
     assert strip_lies_on_screen(enough, screen)
+
+
+EDID_SCREENS = [
+    ScreenDesc(
+        "C30SK PRO",
+        Rect(0, 0, 2560, 1080),
+        Rect(0, 0, 2560, 1032),
+        True,
+    ),
+    ScreenDesc(
+        "DELL U2412",
+        Rect(2560, 0, 4480, 1080),
+        Rect(2560, 0, 4480, 1080),
+        False,
+    ),
+]
+WIN32_MONITORS = [
+    MonitorDesc(r"\\.\DISPLAY1", Rect(0, 0, 2560, 1080), Rect(0, 0, 2560, 1032), True),
+    MonitorDesc(r"\\.\DISPLAY2", Rect(2560, 0, 4480, 1080), Rect(2560, 0, 4480, 1080), False),
+]
+
+
+def test_edid_names_match_win32_rect() -> None:
+    first = select_screen(1, EDID_SCREENS, WIN32_MONITORS)
+    second = select_screen(2, EDID_SCREENS, WIN32_MONITORS)
+    primary = select_screen("primary", EDID_SCREENS, WIN32_MONITORS)
+    union = select_screen("all", EDID_SCREENS, WIN32_MONITORS)
+    assert first.fallback is False
+    assert first.match == "win32"
+    assert first.name == "C30SK PRO"
+    assert first.walk == Rect(0, 0, 2560, 1032)
+    assert format_screen_log(first) == (
+        "монитор 1: C30SK PRO (по Win32 \\\\.\\DISPLAY1), "
+        "область ходьбы: (0,0)-(2560,1032)"
+    )
+    assert second.fallback is False
+    assert second.name == "DELL U2412"
+    assert second.walk == Rect(2560, 0, 4480, 1080)
+    assert primary.name == "C30SK PRO"
+    assert primary.primary is True
+    assert primary.fallback is False
+    assert union.walk == Rect(0, 0, 4480, 1080)
+    assert union.match == "all"
+    assert format_monitors_log(WIN32_MONITORS) == (
+        "мониторы: \\\\.\\DISPLAY1 2560x1080 at (0,0) work=(0,0,2560,1032) primary; "
+        "\\\\.\\DISPLAY2 1920x1080 at (2560,0) work=(2560,0,4480,1080)"
+    )
+
+
+def test_no_name_or_rect_falls_back_to_primary(caplog) -> None:
+    qt = [
+        ScreenDesc("C30SK PRO", Rect(0, 0, 2560, 1080), Rect(0, 0, 2560, 1032), True),
+        ScreenDesc("DELL U2412", Rect(2560, 0, 4480, 1080), Rect(2560, 0, 4480, 1080), False),
+    ]
+    win32 = [
+        MonitorDesc(r"\\.\DISPLAY1", Rect(9000, 9000, 10000, 10000), Rect(9000, 9000, 10000, 9900), True),
+    ]
+    session = ScreenSession(1)
+    with caplog.at_level(logging.WARNING, logger="fly_pet"):
+        choice = session.resolve(qt, win32)
+    assert choice.fallback is True
+    assert choice.name == "C30SK PRO"
+    assert choice.primary is True
+    assert choice.walk == Rect(0, 0, 2560, 1032)
+    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "DISPLAY1" in warnings[0]
+
+
+def test_dpi_scale_matches_and_warns(caplog) -> None:
+    qt = [
+        ScreenDesc(
+            "C30SK PRO",
+            Rect(0, 0, 1280, 720),
+            Rect(0, 0, 1280, 680),
+            True,
+            device_pixel_ratio=2.0,
+        )
+    ]
+    win32 = [
+        MonitorDesc(
+            r"\\.\DISPLAY1",
+            Rect(0, 0, 2560, 1440),
+            Rect(0, 0, 2560, 1360),
+            True,
+        )
+    ]
+    session = ScreenSession(1)
+    with caplog.at_level(logging.WARNING, logger="fly_pet"):
+        choice = session.resolve(qt, win32)
+    assert choice.fallback is False
+    assert choice.match == "win32"
+    assert choice.name == "C30SK PRO"
+    assert choice.walk == Rect(0, 0, 1280, 680)
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    text = warnings[0].message
+    assert "1280x720" in text
+    assert "2560x1440" in text
+    assert r"\\.\DISPLAY1" in text or "DISPLAY1" in text
+
+
+def test_shifted_rect_matches_by_center() -> None:
+    qt = [
+        ScreenDesc("C30SK PRO", Rect(0, 0, 2560, 1080), Rect(0, 0, 2560, 1032), True),
+    ]
+    win32 = [
+        MonitorDesc(r"\\.\DISPLAY1", Rect(10, 10, 2570, 1090), Rect(10, 10, 2570, 1042), True),
+    ]
+    choice = select_screen(1, qt, win32)
+    assert choice.fallback is False
+    assert choice.match == "win32"
+    assert choice.name == "C30SK PRO"
+    assert choice.dpi_note is not None
 
 
 def test_icon_on_second_monitor_is_rejected() -> None:

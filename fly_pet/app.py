@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import QApplication
 from fly_pet.animation import load_frames
 from fly_pet.brain import BrainClient, BrainResult
 from fly_pet.config import Config, load_config
+from fly_pet.desktop_icons import ensure_dpi_aware
 from fly_pet.eat import wire_demo_eat
 from fly_pet.envload import load_env_file
 from fly_pet.locomotion import Locomotion, Rect, Win32WindowApi
@@ -23,8 +24,10 @@ from fly_pet.paths import resource_dir
 from fly_pet.phrases import pick
 from fly_pet.screens import (
     ScreenSession,
+    format_monitors_log,
     format_screen_log,
     icon_on_screen,
+    list_monitors,
     read_qt_screens,
 )
 from fly_pet.state import StateStore
@@ -55,6 +58,7 @@ def build_app(
     demo_eat: bool = False,
 ) -> QApplication:
     """Собирает QApplication, таймеры анимации/потребностей и показывает FlyWindow."""
+    dpi_mode = ensure_dpi_aware()
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
@@ -64,7 +68,14 @@ def build_app(
 
     frames = load_frames(resource_dir())
     screen_session = ScreenSession(config.window.monitor)
-    screen_choice = screen_session.resolve(read_qt_screens())
+
+    def resolve_screen():
+        return screen_session.resolve(read_qt_screens(), list_monitors())
+
+    monitors = list_monitors()
+    logger.info("DPI: %s", dpi_mode)
+    logger.info("%s", format_monitors_log(monitors))
+    screen_choice = screen_session.resolve(read_qt_screens(), monitors)
     logger.info("%s", format_screen_log(screen_choice))
     state = state_store.load()
     # Стартовые needs из конфига, если state ещё дефолтный и файла не было — уже в state;
@@ -79,7 +90,7 @@ def build_app(
     )
 
     def current_walk_rect() -> Rect:
-        updated = screen_session.resolve(read_qt_screens())
+        updated = resolve_screen()
         window.set_screen_bounds(updated.walk, updated.geometry)
         return updated.walk
     needs = Needs(state.needs, config.needs, mode=state.mode)
@@ -218,7 +229,7 @@ def build_app(
         app.quit()
 
     def _icon_on_my_screen(icon: dict) -> bool:
-        updated = screen_session.resolve(read_qt_screens())
+        updated = resolve_screen()
         if screen_session.spec == "all":
             return True
         return icon_on_screen(icon, updated.geometry)
