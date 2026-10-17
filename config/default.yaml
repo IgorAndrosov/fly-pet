@@ -13,6 +13,7 @@ window:
   desktop_reassert_ms: 800     # период проверки сторожа, миллисекунды
   feeding_point: { x: null, y: null }  # null → правый нижний угол рабочей области
   title: "fly-pet"
+  monitor: 1              # 1, 2, … = \\.\DISPLAY<n>; primary = основной; all = все (отладка)
 
 tick:
   needs_interval_sec: 30

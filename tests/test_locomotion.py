@@ -981,3 +981,75 @@ def test_fly_to_arrives_and_calls_callback() -> None:
     assert loco._x == pytest.approx(400.0, abs=1.0)
     assert loco._y == pytest.approx(300.0, abs=1.0)
     assert loco.mode == LocomotionMode.DESKTOP
+
+
+def test_pick_ignores_windows_on_other_monitor() -> None:
+    screen = Rect(0, 0, 1920, 1080)
+    on_first = _win(1, "One", rect=Rect(80, 40, 900, 700))
+    on_second = _win(2, "Two", rect=Rect(2000, 40, 2800, 700))
+    # Заголовок пересекает стык, но центр на DISPLAY2.
+    straddling = _win(3, "Edge", rect=Rect(1500, 40, 2600, 700))
+    api = FakeApi([on_first, on_second, straddling])
+    loco, _, _ = _make_loco(
+        api=api,
+        desktop=screen,
+        pet_w=96,
+        pet_h=96,
+        seed=2,
+    )
+    for _ in range(25):
+        pick = loco._pick_window_target()
+        assert pick is not None
+        assert pick[0] == 1
+        assert screen.left <= pick[1] < screen.right
+
+
+def test_lost_screen_pulls_pet_inside() -> None:
+    wide = Rect(0, 0, 3840, 1080)
+    narrow = Rect(0, 0, 1920, 1080)
+
+    def bounds() -> Rect:
+        return narrow
+
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(desktop_margin_px=0, desktop_stay_sec=(1000, 1000), seed=4),
+        desktop=wide,
+        pet_w=96,
+        pet_h=96,
+        seed=4,
+    )
+    loco._bounds_getter = bounds
+    loco.resume_from_desktop(2500.0, 400.0)
+    assert loco.pose.x == pytest.approx(2500.0)
+    loco.step(0.02)
+    assert loco.pose.x <= 1920 - 96
+    assert loco.pose.y <= 1080 - 96
+
+
+def test_panic_fly_stays_on_selected_screen() -> None:
+    screen = Rect(0, 0, 1920, 1032)
+    other = _win(9, "Other", rect=Rect(2100, 20, 3000, 800))
+    api = FakeApi([other])
+    loco, _, _ = _make_loco(
+        cfg=FakeWalk(
+            scare_cursor=True,
+            scare_radius_px=800,
+            panic_radius_px=700,
+            fly_to_window_chance=0.0,
+            desktop_fly_margin_px=30,
+            desktop_margin_px=10,
+            seed=5,
+        ),
+        api=api,
+        desktop=screen,
+        pet_w=96,
+        pet_h=96,
+        seed=5,
+    )
+    loco.resume_from_desktop(400.0, 700.0)
+    loco._cursor_getter = lambda: (440.0, 740.0)
+    loco.step(0.05)
+    assert loco.state == LocomotionState.TAKEOFF
+    assert screen.left <= loco._flight_x1 <= screen.right - 96
+    assert screen.top <= loco._flight_y1 <= screen.bottom - 96
+    assert loco._flight_target_hwnd is None

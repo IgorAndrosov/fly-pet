@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from fly_pet.paths import default_data_dir, resource_dir
+from fly_pet.screens import MonitorSpecError, parse_monitor
 
 
 class ConfigError(Exception):
@@ -119,6 +120,7 @@ class WindowConfig:
     desktop_reassert_ms: int
     feeding_point: FeedingPointConfig
     title: str
+    monitor: int | str
 
 
 @dataclass(frozen=True)
@@ -257,6 +259,13 @@ class Config:
         return self.data_dir / name
 
 
+def _parse_monitor(value: Any) -> int | str:
+    try:
+        return parse_monitor(value)
+    except MonitorSpecError as exc:
+        raise ConfigError(f"«window.monitor»: {exc}") from exc
+
+
 def _parse_needs_map(raw: Any, path: str, keys: tuple[str, ...]) -> dict[str, float]:
     data = _require_dict(raw, path)
     result: dict[str, float] = {}
@@ -389,6 +398,7 @@ def _parse_config(raw: dict[str, Any], data_dir: Path) -> Config:
             y=_as_optional_int(feeding_raw.get("y"), "window.feeding_point.y"),
         ),
         title=_as_str(window_raw.get("title"), "window.title"),
+        monitor=_parse_monitor(window_raw.get("monitor", 1)),
     )
 
     tick = TickConfig(

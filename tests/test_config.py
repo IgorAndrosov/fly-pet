@@ -16,6 +16,7 @@ def test_load_defaults(tmp_path: Path) -> None:
     cfg = load_config(repo_root=REPO_ROOT, data_dir=tmp_path)
     assert cfg.desktop.allowed_extensions == []
     assert cfg.window.always_on_top is False
+    assert cfg.window.monitor == 1
     assert cfg.window.desktop_reassert is True
     assert cfg.window.desktop_reassert_ms == 800
     assert cfg.safety.dry_run is True
@@ -66,6 +67,24 @@ def test_merge_settings_yaml(tmp_path: Path) -> None:
     assert cfg.window.always_on_top is False
     assert cfg.desktop.blocked_extensions == [".lnk", ".url", ".ini"]
     assert cfg.tick.needs_interval_sec == 30
+
+
+def test_monitor_override(tmp_path: Path) -> None:
+    (tmp_path / "settings.yaml").write_text(
+        "window:\n  monitor: primary\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(repo_root=REPO_ROOT, data_dir=tmp_path)
+    assert cfg.window.monitor == "primary"
+
+
+def test_monitor_rejects_zero(tmp_path: Path) -> None:
+    (tmp_path / "settings.yaml").write_text(
+        "window:\n  monitor: 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="window.monitor"):
+        load_config(repo_root=REPO_ROOT, data_dir=tmp_path)
 
 
 def test_broken_yaml_raises(tmp_path: Path) -> None:

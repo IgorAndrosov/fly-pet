@@ -27,6 +27,7 @@ class SpeechBubble(QWidget):
         self._text = ""
         self._anchor: QWidget | None = None
         self._tail_bottom = True  # хвост вниз (облачко сверху питомца)
+        self._clamp_rect: QRect | None = None
 
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         self.setWindowFlags(flags)
@@ -68,6 +69,10 @@ class SpeechBubble(QWidget):
         """Привязать облачко к окну питомца."""
         self._anchor = window
 
+    def set_clamp_rect(self, rect: QRect | None) -> None:
+        """Рабочая область выбранного монитора. None — основной экран."""
+        self._clamp_rect = rect
+
     def place_near(self, anchor: QWidget) -> None:
         """Поставить облачко рядом с якорем внутри availableGeometry."""
         self._anchor = anchor
@@ -75,11 +80,13 @@ class SpeechBubble(QWidget):
             return
         self._relayout()
 
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            self.move(anchor.pos())
-            return
-        geo = screen.availableGeometry()
+        geo = self._clamp_rect
+        if geo is None or geo.width() <= 0 or geo.height() <= 0:
+            screen = QApplication.primaryScreen()
+            if screen is None:
+                self.move(anchor.pos())
+                return
+            geo = screen.availableGeometry()
         aw = anchor.frameGeometry()
         bw, bh = self.width(), self.height()
         gap = self._config.offset_px

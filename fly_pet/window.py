@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import QApplication, QWidget
 
 from fly_pet.animation import AnimationPlayer
 from fly_pet.bubble import SpeechBubble
+from fly_pet.locomotion import Rect
 
 if TYPE_CHECKING:
     from fly_pet.config import Config
@@ -92,6 +93,9 @@ class FlyWindow(QWidget):
         state: PetState,
         frames: dict[str, list[QPixmap]],
         parent: QWidget | None = None,
+        *,
+        screen_walk: Rect | None = None,
+        screen_geometry: Rect | None = None,
     ) -> None:
         super().__init__(parent)
         self._config = config
@@ -119,6 +123,10 @@ class FlyWindow(QWidget):
         self._desktop_cover_hits = 0
         self._desktop_cover_misses = 0
         self._desktop_last_probe = ""  # последний наблюдаемый класс для INFO-лога
+        self._screen_walk: QRect | None = None
+        self._screen_geometry: QRect | None = None
+        if screen_walk is not None:
+            self._apply_screen_rects(screen_walk, screen_geometry or screen_walk)
 
         flags = Qt.WindowType.FramelessWindowHint
         if config.window.tool_window:
@@ -134,6 +142,8 @@ class FlyWindow(QWidget):
 
         self._bubble = SpeechBubble(config.bubble)
         self._bubble.attach_to(self)
+        if self._screen_walk is not None:
+            self._bubble.set_clamp_rect(self._screen_walk)
 
         interval_ms = max(1, int(round(1000 / config.tick.animation_fps)))
         self._timer = QTimer(self)
@@ -204,10 +214,28 @@ class FlyWindow(QWidget):
         self._loco_timer.timeout.connect(self._on_locomotion_tick)
         self._loco_timer.start()
 
+    def set_screen_bounds(self, walk: Rect, geometry: Rect | None = None) -> None:
+        """Обновить монитор питомца (ходьба и облачко — рабочая область)."""
+        self._apply_screen_rects(walk, geometry or walk)
+        self._bubble.set_clamp_rect(self._screen_walk)
+
+    def _apply_screen_rects(self, walk: Rect, geometry: Rect) -> None:
+        self._screen_walk = QRect(int(walk.left), int(walk.top), int(walk.width), int(walk.height))
+        self._screen_geometry = QRect(
+            int(geometry.left),
+            int(geometry.top),
+            int(geometry.width),
+            int(geometry.height),
+        )
+
     def _on_locomotion_tick(self) -> None:
         if self._locomotion is None or self._dragging:
             return
         if self._state.mode in {"sleep", "eat"}:
+            self._locomotion.sync_screen()
+            if self._locomotion.consume_bounds_changed():
+                pose = self._locomotion.pose
+                self.move(int(round(pose.x)), int(round(pose.y)))
             return
 
         now = time.monotonic()
@@ -217,6 +245,7 @@ class FlyWindow(QWidget):
             dt = max(0.0, now - self._loco_last_mono)
         self._loco_last_mono = now
         pose = self._locomotion.step(dt)
+        pulled = self._locomotion.consume_bounds_changed()
         self._facing = int(pose.facing)
         self._sprite_angle_deg = float(self._locomotion.sprite_angle_deg())
         if self._state.mode not in {"sleep", "eat"}:
@@ -224,7 +253,7 @@ class FlyWindow(QWidget):
                 self._state.mode = "idle"
             else:
                 self._state.mode = self._locomotion.mode.value
-        if not self._locomotion.is_hold_still():
+        if not self._locomotion.is_hold_still() or pulled:
             self.move(int(round(pose.x)), int(round(pose.y)))
         anim = _MODE_TO_ANIM.get(pose.anim, pose.anim)
         self._player.set_state(anim)
@@ -352,10 +381,12 @@ class FlyWindow(QWidget):
         self._state_store.save(self._state)
 
     def _resolve_start_pos(self) -> QPoint:
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            return QPoint(0, 0)
-        geo = screen.availableGeometry()
+        geo = self._screen_walk
+        if geo is None:
+            screen = QApplication.primaryScreen()
+            if screen is None:
+                return QPoint(0, 0)
+            geo = screen.availableGeometry()
         pose = self._state.pose or {}
         x_raw, y_raw = pose.get("x"), pose.get("y")
         if isinstance(x_raw, (int, float)) and isinstance(y_raw, (int, float)):
@@ -450,10 +481,12 @@ class FlyWindow(QWidget):
     def _probe_point(self) -> QPoint:
         """Центр окна; если вне экрана — ближайшая внутренняя точка."""
         center = self.frameGeometry().center()
-        screen = QApplication.primaryScreen()
-        if screen is None:
-            return center
-        geo = screen.geometry()
+        geo = self._screen_geometry
+        if geo is None:
+            screen = QApplication.primaryScreen()
+            if screen is None:
+                return center
+            geo = screen.geometry()
         x = max(geo.left(), min(center.x(), geo.right()))
         y = max(geo.top(), min(center.y(), geo.bottom()))
         return QPoint(x, y)

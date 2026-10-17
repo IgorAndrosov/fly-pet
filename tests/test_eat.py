@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PyQt6.QtWidgets import QApplication
+
 from fly_pet.desktop_icons import icon_display_names
-from fly_pet.eat import DEMO_FILENAME, create_demo_file, move_to_quarantine, quarantine_path
+from fly_pet.eat import (
+    DEMO_FILENAME,
+    DemoEatController,
+    create_demo_file,
+    move_to_quarantine,
+    quarantine_path,
+)
+from fly_pet.state import StateStore, default_state
 
 
 def test_icon_display_names_include_stem() -> None:
@@ -24,6 +36,50 @@ def test_create_and_quarantine(tmp_path: Path) -> None:
     assert dest.is_file()
     assert dest.parent == tmp_path / "trash"
     assert dest.name == DEMO_FILENAME
+
+
+class _SayWindow:
+    def __init__(self) -> None:
+        self.said: list[str] = []
+        self._locomotion = None
+
+    def say(self, text: str, ttl_ms: int | None = None) -> None:
+        del ttl_ms
+        self.said.append(text)
+
+
+def test_offscreen_icon_aborts_without_overlay(tmp_path: Path) -> None:
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    del app
+    desktop = tmp_path / "Desktop"
+    path = create_demo_file(desktop)
+    window = _SayWindow()
+    store = StateStore(tmp_path)
+    ctrl = DemoEatController(
+        window=window,  # type: ignore[arg-type]
+        state=default_state(),
+        state_store=store,
+        data_dir=tmp_path,
+        icon_on_screen=lambda _icon: False,
+    )
+    ctrl._busy = True
+    ctrl._demo_path = path
+    ctrl._on_icon_for_cell(
+        {
+            "name": DEMO_FILENAME,
+            "screen_x": 2100,
+            "screen_y": 40,
+            "cell": [76, 100],
+        }
+    )
+    assert ctrl._busy is False
+    assert ctrl._overlay is None
+    assert ctrl._phase == "idle"
+    assert not path.exists()
+    assert (tmp_path / "trash" / DEMO_FILENAME).is_file()
+    assert window.said == ["файл не на моём экране"]
 
 
 def test_quarantine_collision_gets_timestamp(tmp_path: Path) -> None:

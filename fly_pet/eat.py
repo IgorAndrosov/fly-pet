@@ -6,7 +6,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from PyQt6.QtCore import QObject, QRect, QTimer
 from PyQt6.QtGui import QImage
@@ -94,12 +94,14 @@ class DemoEatController(QObject):
         state_store: StateStore,
         data_dir: Path,
         parent: QObject | None = None,
+        icon_on_screen: Callable[[dict], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self._window = window
         self._state = state
         self._store = state_store
         self._data_dir = Path(data_dir)
+        self._icon_on_screen = icon_on_screen
         self._busy = False
         self._demo_path: Path | None = None
         self._poll: QTimer | None = None
@@ -194,6 +196,9 @@ class DemoEatController(QObject):
 
     def _on_icon_for_cell(self, icon: dict) -> None:
         """Фаза 1: знаем клетку → убрать файл → снять пустой фон → вернуть файл."""
+        if self._icon_on_screen is not None and not self._icon_on_screen(icon):
+            self._abort_offscreen()
+            return
         cell = icon_cell_rect(icon)
         self._cell = cell
         self._icon = dict(icon)
@@ -349,6 +354,22 @@ class DemoEatController(QObject):
 
     def _locomotion(self) -> Locomotion | None:
         return self._window._locomotion
+
+    def _abort_offscreen(self) -> None:
+        """Иконка не на выбранном мониторе: реплика, карантин, без оверлея."""
+        logger.warning("иконка демо-файла не на выбранном экране")
+        self._say_text("файл не на моём экране")
+        path = self._demo_path
+        if path is not None and path.is_file():
+            try:
+                moved = move_to_quarantine(path, self._data_dir)
+                logger.info("демо-файл убран в карантин: %s", moved)
+            except OSError as exc:
+                logger.warning("не удалось убрать демо-файл: %s", exc)
+        self._demo_path = None
+        self._teardown_overlay()
+        self._busy = False
+        self._phase = "idle"
 
     def _say(self, event: str) -> None:
         phrase = pick(event)
@@ -533,6 +554,7 @@ def wire_demo_eat(
     state_store: StateStore,
     data_dir: Path,
     parent: QObject | None = None,
+    icon_on_screen: Callable[[dict], bool] | None = None,
 ) -> DemoEatController:
     """Создать контроллер демо-поедания."""
     return DemoEatController(
@@ -541,4 +563,5 @@ def wire_demo_eat(
         state_store=state_store,
         data_dir=data_dir,
         parent=parent,
+        icon_on_screen=icon_on_screen,
     )

@@ -21,6 +21,12 @@ from fly_pet.logging_setup import setup_logging
 from fly_pet.needs import Needs
 from fly_pet.paths import resource_dir
 from fly_pet.phrases import pick
+from fly_pet.screens import (
+    ScreenSession,
+    format_screen_log,
+    icon_on_screen,
+    read_qt_screens,
+)
 from fly_pet.state import StateStore
 from fly_pet.tray import TrayController
 from fly_pet.window import FlyWindow
@@ -42,14 +48,6 @@ def _mode_to_anim(mode: str) -> str:
     return mode if mode in {"idle", "walk", "sleep"} else "idle"
 
 
-def _desktop_rect() -> Rect:
-    screen = QApplication.primaryScreen()
-    if screen is None:
-        return Rect(0, 0, 1920, 1080)
-    geo = screen.availableGeometry()
-    return Rect(int(geo.x()), int(geo.y()), int(geo.x() + geo.width()), int(geo.y() + geo.height()))
-
-
 def build_app(
     config: Config,
     state_store: StateStore,
@@ -65,10 +63,25 @@ def build_app(
     app.setQuitOnLastWindowClosed(False)
 
     frames = load_frames(resource_dir())
+    screen_session = ScreenSession(config.window.monitor)
+    screen_choice = screen_session.resolve(read_qt_screens())
+    logger.info("%s", format_screen_log(screen_choice))
     state = state_store.load()
     # Стартовые needs из конфига, если state ещё дефолтный и файла не было — уже в state;
     # не перетираем сохранённые значения.
-    window = FlyWindow(config, state_store, state, frames)
+    window = FlyWindow(
+        config,
+        state_store,
+        state,
+        frames,
+        screen_walk=screen_choice.walk,
+        screen_geometry=screen_choice.geometry,
+    )
+
+    def current_walk_rect() -> Rect:
+        updated = screen_session.resolve(read_qt_screens())
+        window.set_screen_bounds(updated.walk, updated.geometry)
+        return updated.walk
     needs = Needs(state.needs, config.needs, mode=state.mode)
     if needs.mode != state.mode:
         state.mode = needs.mode
@@ -80,8 +93,9 @@ def build_app(
             config.walk,
             pet_width=config.window.width,
             pet_height=config.window.height,
-            desktop=_desktop_rect(),
+            desktop=screen_choice.walk,
             api=api,
+            bounds_getter=current_walk_rect,
             our_hwnd_getter=lambda: int(window.winId()) if window.winId() else 0,
         )
         pos = window.pos()
@@ -203,12 +217,19 @@ def build_app(
         window.hide()
         app.quit()
 
+    def _icon_on_my_screen(icon: dict) -> bool:
+        updated = screen_session.resolve(read_qt_screens())
+        if screen_session.spec == "all":
+            return True
+        return icon_on_screen(icon, updated.geometry)
+
     demo = wire_demo_eat(
         window=window,
         state=state,
         state_store=state_store,
         data_dir=config.data_dir,
         parent=window,
+        icon_on_screen=_icon_on_my_screen,
     )
 
     tray = TrayController(

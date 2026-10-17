@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from ctypes import wintypes
 
@@ -71,6 +71,8 @@ _TAKEOFF_RISE_PX = 56.0
 _LANDING_SEC = 0.4
 _STRIP_MIN_H = 24
 _STRIP_MAX_H = 44
+# Доля ширины полосы заголовка, которая должна лежать на выбранном экране.
+STRIP_ON_SCREEN_MIN_RATIO = 0.6
 
 
 @dataclass(frozen=True)
@@ -236,6 +238,39 @@ def _rects_intersect(a: Rect, b: Rect) -> bool:
     )
 
 
+def strip_lies_on_screen(
+    strip: Rect,
+    screen: Rect,
+    *,
+    min_width_ratio: float = STRIP_ON_SCREEN_MIN_RATIO,
+) -> bool:
+    """Центр полосы внутри экрана и пересечение ≥ ``min_width_ratio`` её ширины.
+
+    Правая/нижняя граница экрана открытая: стык мониторов принадлежит следующему.
+    """
+    if strip.width <= 0 or strip.height <= 0 or screen.width <= 0 or screen.height <= 0:
+        return False
+    cx = (strip.left + strip.right) / 2.0
+    cy = (strip.top + strip.bottom) / 2.0
+    if not (screen.left <= cx < screen.right and screen.top <= cy < screen.bottom):
+        return False
+    overlap_w = min(strip.right, screen.right) - max(strip.left, screen.left)
+    if overlap_w <= 0:
+        return False
+    return overlap_w >= float(min_width_ratio) * float(strip.width)
+
+
+def strip_x_limits(strip: Rect, screen: Rect, pet_w: int) -> tuple[float, float] | None:
+    """Диапазон ``window_offset_x`` от левого края полосы, целиком на экране."""
+    left = max(strip.left, screen.left)
+    right = min(strip.right, screen.right)
+    lo = float(left - strip.left)
+    hi = float(right - strip.left - int(pet_w))
+    if hi < lo:
+        return None
+    return lo, hi
+
+
 def filter_window_candidates(
     windows: Sequence[WindowInfo],
     *,
@@ -245,8 +280,14 @@ def filter_window_candidates(
     our_hwnd: int | None = None,
     exclude_hwnds: Sequence[int] | None = None,
     screen: Rect | None = None,
+    strips: Mapping[int, Rect] | None = None,
 ) -> list[WindowInfo]:
-    """Жёсткий отбор окон-кандидатов для посадки."""
+    """Жёсткий отбор окон-кандидатов для посадки.
+
+    Если заданы ``screen`` и ``strips``, окно годится только когда полоса заголовка
+    лежит на этом экране (центр внутри и ≥60% ширины). Без ``strips`` — прежняя
+    проверка пересечения прямоугольника окна.
+    """
     ignored = {t.casefold() for t in ignore_titles}
     excluded = set(exclude_hwnds or ())
     result: list[WindowInfo] = []
@@ -263,7 +304,11 @@ def filter_window_candidates(
             continue
         if not info.intersects_screen:
             continue
-        if screen is not None and not _rects_intersect(info.rect, screen):
+        if screen is not None and strips is not None:
+            strip = strips.get(info.hwnd)
+            if strip is None or not strip_lies_on_screen(strip, screen):
+                continue
+        elif screen is not None and not _rects_intersect(info.rect, screen):
             continue
         if info.has_owner:
             continue
@@ -441,6 +486,7 @@ class Win32WindowApi:
         rect = self._window_rect(hwnd)
         if rect is None:
             return None
+        # Виртуальный экран — только «окно вообще видно», не область движения.
         screen = self._virtual_screen_rect()
         intersects = screen is None or _rects_intersect(rect, screen)
         return WindowInfo(
@@ -555,6 +601,8 @@ class Locomotion(LocomotionDriver):
         our_hwnd_getter: Callable[[], int] | None = None,
         rng: random.Random | None = None,
         cursor_getter: Callable[[], tuple[float, float] | None] | None = None,
+        bounds_getter: Callable[[], Rect] | None = None,
+        on_bounds_changed: Callable[[Rect], None] | None = None,
     ) -> None:
         self._cfg = walk_cfg
         self._pet_w = int(pet_width)
@@ -563,6 +611,9 @@ class Locomotion(LocomotionDriver):
         self._api = api
         self._our_hwnd_getter = our_hwnd_getter or (lambda: 0)
         self._cursor_getter = cursor_getter or get_cursor_pos
+        self._bounds_getter = bounds_getter
+        self._on_bounds_changed = on_bounds_changed
+        self._bounds_changed = False
         seed = getattr(walk_cfg, "seed", None)
         self._rng = rng if rng is not None else random.Random(seed)
         self._mode = LocomotionMode.DESKTOP
@@ -741,7 +792,82 @@ class Locomotion(LocomotionDriver):
             self._flight_y1,
         )
 
+    def _sync_bounds(self) -> None:
+        getter = self._bounds_getter
+        if getter is None:
+            return
+        try:
+            rect = getter()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("не удалось обновить экран: %s", exc)
+            return
+        if rect is None:
+            return
+        if rect == self._desktop:
+            return
+        logger.info(
+            "область ходьбы: (%s,%s)-(%s,%s)",
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+        )
+        self._desktop = rect
+        self._contain_on_screen()
+        self._bounds_changed = True
+        if self._on_bounds_changed is not None:
+            self._on_bounds_changed(rect)
+
+    def _contain_on_screen(self) -> None:
+        """После смены экрана не оставлять питомца за его пределами."""
+        if self._state == LocomotionState.ON_WINDOW and self._attached_hwnd is not None:
+            info = self._api.refresh_window(self._attached_hwnd)
+            strip = self._api.title_bar_strip(info) if info is not None else None
+            if strip is None or not strip_lies_on_screen(strip, self._desktop):
+                logger.info("экран сменился — слезаю с окна вне области")
+                self._land_stay_on_desktop()
+                return
+            limits = strip_x_limits(strip, self._desktop, self._pet_w)
+            if limits is None:
+                self._land_stay_on_desktop()
+                return
+            lo, hi = limits
+            self._window_offset_x = max(lo, min(hi, self._window_offset_x))
+            self._x = float(strip.left) + self._window_offset_x
+            return
+
+        if self._flight_target_hwnd is not None and self._state in {
+            LocomotionState.TAKEOFF,
+            LocomotionState.IN_FLIGHT,
+            LocomotionState.LANDING,
+        }:
+            info = self._api.refresh_window(self._flight_target_hwnd)
+            strip = self._api.title_bar_strip(info) if info is not None else None
+            if strip is None or not strip_lies_on_screen(strip, self._desktop):
+                self._flight_target_hwnd = None
+                self._flight_to_desktop = True
+                self._flight_x1, self._flight_y1 = self._pick_desktop_fly_point()
+        self._x, self._y = self._clamp_desktop_xy(self._x, self._y)
+        if self._state in {
+            LocomotionState.TAKEOFF,
+            LocomotionState.IN_FLIGHT,
+            LocomotionState.LANDING,
+        }:
+            self._flight_x1, self._flight_y1 = self._clamp_desktop_xy(
+                self._flight_x1, self._flight_y1
+            )
+
+    def sync_screen(self) -> None:
+        """Перечитать область ходьбы. Если монитор пропал — затянуть питомца внутрь."""
+        self._sync_bounds()
+
+    def consume_bounds_changed(self) -> bool:
+        changed = self._bounds_changed
+        self._bounds_changed = False
+        return changed
+
     def step(self, dt_sec: float) -> LocomotionPose:
+        self._sync_bounds()
         if self._paused or self._hold_still or dt_sec <= 0:
             if self._hold_still:
                 self._anim = "idle"
@@ -1177,6 +1303,11 @@ class Locomotion(LocomotionDriver):
         excluded = set(self._failed_attach_hwnds)
         if exclude_hwnds:
             excluded |= set(exclude_hwnds)
+        strips: dict[int, Rect] = {}
+        for info in raw:
+            strip = self._api.title_bar_strip(info)
+            if strip is not None:
+                strips[info.hwnd] = strip
         cands = filter_window_candidates(
             raw,
             min_width=int(getattr(self._cfg, "min_window_width", 320)),
@@ -1184,18 +1315,22 @@ class Locomotion(LocomotionDriver):
             ignore_titles=list(getattr(self._cfg, "ignore_titles", [])),
             our_hwnd=our or None,
             exclude_hwnds=list(excluded),
+            screen=self._desktop,
+            strips=strips,
         )
-        usable: list[tuple[WindowInfo, Rect]] = []
+        usable: list[tuple[WindowInfo, Rect, float, float]] = []
         for info in cands:
-            strip = self._api.title_bar_strip(info)
-            if strip is None or strip.width < self._pet_w:
+            strip = strips.get(info.hwnd)
+            if strip is None:
                 continue
-            usable.append((info, strip))
+            limits = strip_x_limits(strip, self._desktop, self._pet_w)
+            if limits is None:
+                continue
+            usable.append((info, strip, limits[0], limits[1]))
         if not usable:
             return None
-        info, strip = self._rng.choice(usable)
-        max_off = max(0, strip.width - self._pet_w)
-        offset = float(self._rng.uniform(0, max_off)) if max_off else 0.0
+        info, strip, lo, hi = self._rng.choice(usable)
+        offset = float(self._rng.uniform(lo, hi)) if hi > lo else lo
         x = float(strip.left) + offset
         y = float(strip.top + strip.height / 2 - self._pet_h / 2)
         return info.hwnd, x, y
@@ -1321,13 +1456,20 @@ class Locomotion(LocomotionDriver):
             self._begin_takeoff(to_window=False)
             return
         strip = self._api.title_bar_strip(info)
-        if strip is None or strip.width < self._pet_w:
+        if (
+            strip is None
+            or not strip_lies_on_screen(strip, self._desktop)
+        ):
+            self._begin_takeoff(to_window=False)
+            return
+        limits = strip_x_limits(strip, self._desktop, self._pet_w)
+        if limits is None:
             self._begin_takeoff(to_window=False)
             return
 
-        max_off = float(max(0, strip.width - self._pet_w))
+        lo, hi = limits
         self._window_offset_x = self._tick_walk_or_pause(
-            dt, self._window_offset_x, 0.0, max_off
+            dt, self._window_offset_x, lo, hi
         )
         self._x = float(strip.left) + self._window_offset_x
         self._y = float(strip.top + strip.height / 2 - self._pet_h / 2)
@@ -1401,11 +1543,15 @@ class Locomotion(LocomotionDriver):
             self._attached_hwnd = None
             return False
         strip = self._api.title_bar_strip(info)
-        if strip is None:
+        if strip is None or not strip_lies_on_screen(strip, self._desktop):
             self._attached_hwnd = None
             return False
-        max_off = float(max(0, strip.width - self._pet_w))
-        self._window_offset_x = max(0.0, min(max_off, self._window_offset_x))
+        limits = strip_x_limits(strip, self._desktop, self._pet_w)
+        if limits is None:
+            self._attached_hwnd = None
+            return False
+        lo, hi = limits
+        self._window_offset_x = max(lo, min(hi, self._window_offset_x))
         self._x = float(strip.left) + self._window_offset_x
         self._y = float(strip.top + strip.height / 2 - self._pet_h / 2)
         return True
