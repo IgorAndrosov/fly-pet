@@ -1,0 +1,5 @@
+window:
+  title: "zcheck-90f0c0"
+  desktop_reassert: true
+walk:
+  scare_cursor: false

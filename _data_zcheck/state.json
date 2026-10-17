@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "needs": {
+    "hunger": 40.0,
+    "energy": 70.0,
+    "mood": 60.0,
+    "attention": 50.0
+  },
+  "pose": {
+    "x": null,
+    "y": null,
+    "facing": "left"
+  },
+  "mode": "desktop",
+  "last_brain_at": null,
+  "last_action": {
+    "name": "demo_eat",
+    "at": "2026-10-17T12:52:05Z",
+    "dry_run": false,
+    "ok": true
+  },
+  "last_user_activity_at": null,
+  "pending_reminder": null,
+  "stats": {
+    "actions_run": 1,
+    "llm_calls": 0,
+    "llm_failures": 0,
+    "llm_last_provider": null,
+    "eaten": 1
+  },
+  "eaten": 1
+}
