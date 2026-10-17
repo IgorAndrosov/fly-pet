@@ -63,10 +63,9 @@ _DIFF_RETRY_MAX = 12
 _MIN_OPAQUE = 200
 _PAINT_WAIT_MS = 700
 _CELL_CLEAR_MS = 80
-_CELL_CLEAR_MAX_MS = 1500
+_CELL_CLEAR_MAX_MS = 2000
 HEAD_OFFSET_PX = 32.0
 _SWP_FLAGS = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-_PIXEL_DIFF = 18
 
 
 def facing_angle_deg(head_x: float, head_y: float, bite_x: float, bite_y: float) -> float:
@@ -138,31 +137,6 @@ def run_cell_clear_wait(
         if sleep_ms is not None:
             sleep_ms(step)
         elapsed += step
-
-
-def images_nearly_equal(a: QImage, b: QImage, *, ratio: float = 0.05) -> bool:
-    """Доля сильно отличающихся пикселей не больше ``ratio``."""
-    if a.isNull() or b.isNull():
-        return False
-    w = min(a.width(), b.width())
-    h = min(a.height(), b.height())
-    if w <= 0 or h <= 0:
-        return False
-    diff = 0
-    total = w * h
-    for y in range(h):
-        for x in range(w):
-            c0 = a.pixelColor(x, y)
-            c1 = b.pixelColor(x, y)
-            if (
-                abs(c0.red() - c1.red()) > _PIXEL_DIFF
-                or abs(c0.green() - c1.green()) > _PIXEL_DIFF
-                or abs(c0.blue() - c1.blue()) > _PIXEL_DIFF
-            ):
-                diff += 1
-                if diff / total > ratio:
-                    return False
-    return True
 
 
 def _set_window_pos(hwnd: int, insert_after: int) -> bool:
@@ -668,8 +642,8 @@ class DemoEatController(QObject):
             left_pct,
         )
 
-        # Сначала карантин (настоящая иконка исчезает), оверлей держим,
-        # пока клетка на экране не опустеет.
+        # Оверлей уже залит непрозрачным фоном. Карантин, затем ждём,
+        # пока элемент пропадёт из списка explorer, и только потом снимаем.
         path = self._demo_path
         if path is not None and path.is_file():
             try:
@@ -697,44 +671,15 @@ class DemoEatController(QObject):
         return self._cell_cleared_on_screen()
 
     def _cell_cleared_on_screen(self) -> bool:
-        """Иконки нет в ListView и пиксели клетки совпали с фоном до файла."""
-        if self._icon is None or self._cell is None:
+        """Элемента демо-файла больше нет в SysListView32."""
+        if self._icon is None:
             return True
         try:
             still = find_icon_by_filename(DEMO_FILENAME)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("опрос клетки после карантина: %s", exc)
-            still = None
-        if still is not None:
+            logger.debug("опрос списка после карантина: %s", exc)
             return False
-        bg = self._bg_cell
-        if bg is None or bg.isNull():
-            return True
-        overlay = self._overlay
-        hidden = False
-        if overlay is not None:
-            try:
-                overlay.hide()
-                hidden = True
-                app = QApplication.instance()
-                if app is not None:
-                    app.processEvents()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("скрытие оверлея для пробы клетки: %s", exc)
-                hidden = False
-        try:
-            now = grab_icon_cell(self._icon)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("grab клетки после карантина: %s", exc)
-            now = QImage()
-        empty = images_nearly_equal(now, bg)
-        if hidden and overlay is not None and not empty:
-            try:
-                overlay.show()
-                self._raise_z()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("возврат оверлея: %s", exc)
-        return empty
+        return still is None
 
     def _arm_cell_clear(self) -> None:
         self._clear_elapsed = 0
@@ -773,9 +718,11 @@ class DemoEatController(QObject):
     def _after_cell_clear(self, status: str) -> None:
         if status == "timeout":
             logger.warning(
-                "клетка не опустела за %s мс — снимаю оверлей",
+                "иконка не исчезла за %s мс — снимаю оверлей",
                 _CELL_CLEAR_MAX_MS,
             )
+        elif status == "empty":
+            logger.info("клетка очищена за %s мс", self._clear_elapsed)
         self._teardown_overlay()
         self._state.eaten = int(self._state.eaten) + 1
         self._state.stats["eaten"] = int(self._state.stats.get("eaten", 0)) + 1

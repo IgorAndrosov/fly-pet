@@ -18,6 +18,8 @@ from fly_pet.animation import load_frames
 from fly_pet.config import load_config
 from fly_pet.eat import (
     HEAD_OFFSET_PX,
+    _CELL_CLEAR_MAX_MS,
+    _CELL_CLEAR_MS,
     DemoEatController,
     eaten_percents,
     facing_angle_deg,
@@ -308,7 +310,9 @@ def test_cell_clear_wait_immediate_delayed_and_timeout() -> None:
 
     slept.clear()
     assert run_cell_clear_wait(lambda: False, sleep_ms=_sleep) == "timeout"
-    assert sum(slept) == 1500
+    assert sum(slept) == _CELL_CLEAR_MAX_MS
+    assert _CELL_CLEAR_MAX_MS == 2000
+    assert 80 <= _CELL_CLEAR_MS <= 100
 
 
 def test_cell_clear_timeout_warns_and_finishes(
@@ -330,8 +334,8 @@ def test_cell_clear_timeout_warns_and_finishes(
         ctrl._clear_timer.stop()
         while ctrl._busy:
             ctrl._on_cell_clear_tick()
-    assert ctrl._clear_elapsed == 1500
-    assert any("клетка не опустела" in rec.message for rec in caplog.records)
+    assert ctrl._clear_elapsed == _CELL_CLEAR_MAX_MS
+    assert any("иконка не исчезла за 2000 мс" in rec.message for rec in caplog.records)
     assert ctrl._busy is False
     assert ctrl._overlay is None
     assert overlay.closed is True
@@ -403,3 +407,65 @@ def test_readability_outline_on_eat_off_after(tmp_path: Path) -> None:
     ctrl._teardown_overlay()
     assert fly.outline is False
     assert fly._override is None
+
+
+def _arm_finish(ctrl: DemoEatController, overlay: _Overlay) -> None:
+    ctrl._overlay = overlay  # type: ignore[assignment]
+    ctrl._busy = True
+    ctrl._eat_t0 = 0.0
+    ctrl._bites = []
+    ctrl._demo_path = None
+    ctrl._icon = {"name": "муха-демо.txt"}
+
+
+def test_list_wait_removes_overlay_when_icon_gone(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = {"n": 0}
+
+    def _find(_name: str) -> dict | None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"name": "муха-демо.txt"}
+        return None
+
+    monkeypatch.setattr("fly_pet.eat.find_icon_by_filename", _find)
+    ctrl, _fly = _controller(tmp_path)
+    overlay = _Overlay()
+    _arm_finish(ctrl, overlay)
+    with caplog.at_level(logging.INFO, logger="fly_pet"):
+        ctrl._finish_eat()
+        assert ctrl._busy is True
+        assert overlay.closed is False
+        ctrl._on_cell_clear_tick()
+    text = "\n".join(rec.message for rec in caplog.records)
+    assert f"клетка очищена за {_CELL_CLEAR_MS} мс" in text
+    assert ctrl._busy is False
+    assert ctrl._overlay is None
+    assert overlay.closed is True
+    assert calls["n"] == 2
+
+
+def test_list_wait_timeout_warns_and_removes_overlay(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "fly_pet.eat.find_icon_by_filename",
+        lambda _name: {"name": "муха-демо.txt"},
+    )
+    ctrl, _fly = _controller(tmp_path)
+    overlay = _Overlay()
+    _arm_finish(ctrl, overlay)
+    with caplog.at_level(logging.WARNING, logger="fly_pet"):
+        ctrl._finish_eat()
+        assert ctrl._busy is True
+        while ctrl._busy:
+            ctrl._on_cell_clear_tick()
+    assert ctrl._clear_elapsed == 2000
+    assert any(
+        rec.levelno == logging.WARNING and "иконка не исчезла за 2000 мс" in rec.message
+        for rec in caplog.records
+    )
+    assert ctrl._busy is False
+    assert ctrl._overlay is None
+    assert overlay.closed is True

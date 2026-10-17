@@ -395,6 +395,25 @@ def remaining_ratio(mask: QImage, icon: QImage) -> float:
     return left / total
 
 
+def eaten_end_layers(bg: QImage) -> tuple[QImage, QImage]:
+    """Финал поедания: ``(bg_out, icon_img)``.
+
+    ``bg_out`` — фон клетки с альфой 255 на каждом пикселе.
+    ``icon_img`` — пустой слой (иконку больше не рисуем).
+    """
+    if bg.isNull() or bg.width() <= 0 or bg.height() <= 0:
+        return QImage(), QImage()
+    bg_out = QImage(bg.width(), bg.height(), QImage.Format.Format_ARGB32)
+    for y in range(bg.height()):
+        for x in range(bg.width()):
+            color = bg.pixelColor(x, y)
+            color.setAlpha(255)
+            bg_out.setPixelColor(x, y, color)
+    icon_img = QImage(bg.width(), bg.height(), QImage.Format.Format_ARGB32)
+    icon_img.fill(Qt.GlobalColor.transparent)
+    return bg_out, icon_img
+
+
 def compose_frame(bg: QImage, icon: QImage, mask: QImage) -> QPixmap:
     """Фон клетки + иконка, обрезанная маской укусов."""
     w = min(bg.width(), icon.width(), mask.width())
@@ -456,17 +475,34 @@ class IconEatOverlay(QWidget):
     def apply_bite_and_repaint(self, bite: Bite) -> float:
         """Применить укус; вернуть оставшуюся долю (0…1)."""
         apply_bite(self._mask, bite)
-        self._frame = compose_frame(self._bg, self._icon, self._mask)
-        self.update()
-        return remaining_ratio(self._mask, self._icon)
+        left = remaining_ratio(self._mask, self._icon)
+        if left <= 0.0:
+            self._seal_background()
+        else:
+            self._frame = compose_frame(self._bg, self._icon, self._mask)
+            self.update()
+        return left
 
     def clear_mask(self) -> None:
-        """Добить хвост маски: иконка на оверлее полностью съедена."""
-        if self._mask.isNull():
+        """Добить хвост маски и залить клетку непрозрачным фоном."""
+        if not self._mask.isNull():
+            self._mask.fill(Qt.GlobalColor.transparent)
+        self._seal_background()
+
+    def _seal_background(self) -> None:
+        """Финальный кадр: чистый фон, альфа 255. Настоящая иконка не просвечивает."""
+        bg_out, _icon_img = eaten_end_layers(self._bg)
+        if bg_out.isNull():
+            self.update()
             return
-        self._mask.fill(Qt.GlobalColor.transparent)
-        self._frame = compose_frame(self._bg, self._icon, self._mask)
+        self._frame = QPixmap.fromImage(bg_out)
         self.update()
+
+    def frame_image(self) -> QImage:
+        """Текущий кадр оверлея."""
+        if self._frame.isNull():
+            return QImage()
+        return self._frame.toImage().convertToFormat(QImage.Format.Format_ARGB32)
 
     def show_click_through(self) -> None:
         self.show()
