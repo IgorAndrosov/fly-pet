@@ -26,6 +26,7 @@ LVM_GETITEMSPACING = 0x1033
 LVM_GETITEMTEXTW = 0x1073
 LVIF_TEXT = 0x0001
 SHCNE_CREATE = 0x00000002
+SHCNE_DELETE = 0x00000004
 SHCNE_UPDATEITEM = 0x00002000
 SHCNF_PATHW = 0x0005
 
@@ -88,6 +89,20 @@ def notify_shell_create(path: Path) -> None:
     shell32 = ctypes.windll.shell32
     shell32.SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, str(path), None)
     shell32.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, str(path), None)
+
+
+def notify_shell_delete(path: Path) -> None:
+    """Сообщить explorer'у об удалении/переносе файла со стола."""
+    if sys.platform != "win32":
+        return
+    shell32 = ctypes.windll.shell32
+    shell32.SHChangeNotify(SHCNE_DELETE, SHCNF_PATHW, str(path), None)
+    shell32.SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW, str(path), None)
+
+
+def desktop_listview_hwnd() -> int:
+    """HWND SysListView32 рабочего стола."""
+    return _desktop_listview()
 
 
 def _desktop_listview() -> int:
