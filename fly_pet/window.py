@@ -7,10 +7,21 @@ import logging
 import sys
 import time
 from ctypes import wintypes
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
-from PyQt6.QtGui import QMouseEvent, QPaintEvent, QPainter, QPixmap, QTransform
+from PyQt6.QtGui import (
+    QColor,
+    QImage,
+    QMouseEvent,
+    QPaintEvent,
+    QPainter,
+    QPainterPath,
+    QPainterPathStroker,
+    QPixmap,
+    QTransform,
+)
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from fly_pet.animation import AnimationPlayer
@@ -57,6 +68,35 @@ _MODE_TO_ANIM = {
     "desktop": "idle",
     "window": "idle",
 }
+
+
+def _alpha_halo_path(frame: QPixmap) -> QPainterPath:
+    """Контур силуэта: ``QPainterPath`` по непрозрачным пикселям, обводка 4 px."""
+    image = frame.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+    filled = QPainterPath()
+    if image.isNull():
+        return filled
+    filled.setFillRule(Qt.FillRule.WindingFill)
+    width = image.width()
+    height = image.height()
+    for y in range(height):
+        x = 0
+        while x < width:
+            if image.pixelColor(x, y).alpha() < 40:
+                x += 1
+                continue
+            x0 = x
+            while x < width and image.pixelColor(x, y).alpha() >= 40:
+                x += 1
+            filled.addRect(float(x0), float(y), float(x - x0), 1.0)
+    if filled.isEmpty():
+        return filled
+    silhouette = filled.simplified()
+    stroker = QPainterPathStroker()
+    stroker.setWidth(4.0)  # радиус 2 px
+    stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+    return stroker.createStroke(silhouette)
 
 
 def rotate_sprite_frame(
@@ -115,7 +155,11 @@ class FlyWindow(QWidget):
         self._user_hidden = False  # спрятана через трей — сторож не показывает
         self._facing = 1
         self._sprite_angle_deg = 0.0
+        self._sprite_angle_override: float | None = None
+        self._readability_outline = False
+        self._outline_cache: dict[int, QPainterPath] = {}
         self._rotated_cache: dict[tuple[str, int], QPixmap] = {}
+        self._z_order_keeper: Callable[[], None] | None = None
         self._locomotion: Locomotion | None = None
         self._loco_timer: QTimer | None = None
         self._loco_last_mono: float | None = None
@@ -247,7 +291,8 @@ class FlyWindow(QWidget):
         pose = self._locomotion.step(dt)
         pulled = self._locomotion.consume_bounds_changed()
         self._facing = int(pose.facing)
-        self._sprite_angle_deg = float(self._locomotion.sprite_angle_deg())
+        if self._sprite_angle_override is None:
+            self._sprite_angle_deg = float(self._locomotion.sprite_angle_deg())
         if self._state.mode not in {"sleep", "eat"}:
             if self._locomotion.is_hold_still():
                 self._state.mode = "idle"
@@ -280,20 +325,72 @@ class FlyWindow(QWidget):
         self._current_frame = self._player.advance()
         self.update()
 
+    def sprite_angle_deg(self) -> float:
+        """Угол спрайта: оверрайд поедания, иначе локомоция."""
+        if self._sprite_angle_override is not None:
+            return float(self._sprite_angle_override)
+        return float(self._sprite_angle_deg)
+
+    def set_sprite_angle_override(self, angle: float | None) -> None:
+        """На время поедания подменить угол; ``None`` — снова локомоция."""
+        if angle is None:
+            self._sprite_angle_override = None
+            if self._locomotion is not None:
+                self._sprite_angle_deg = float(self._locomotion.sprite_angle_deg())
+        else:
+            self._sprite_angle_override = float(angle)
+            self._sprite_angle_deg = float(angle)
+        self.update()
+
+    def set_readability_outline(self, enabled: bool) -> None:
+        """Светлый контур под спрайтом — только на время поедания."""
+        self._readability_outline = bool(enabled)
+        self.update()
+
+    def set_z_order_keeper(self, callback: Callable[[], None] | None) -> None:
+        """После каждого ``desktop_reassert`` вернуть оверлей под муху."""
+        self._z_order_keeper = callback
+
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
         del event
         if self._current_frame is None or self._current_frame.isNull():
             return
         frame = self._rotated_frame(
             self._current_frame,
-            self._sprite_angle_deg,
+            self.sprite_angle_deg(),
             frame_name=self._player.state,
         )
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         x = (self.width() - frame.width()) // 2
         y = (self.height() - frame.height()) // 2
+        if self._readability_outline:
+            self._paint_readability_outline(painter, frame, x, y)
         painter.drawPixmap(x, y, frame)
+
+    def _paint_readability_outline(
+        self, painter: QPainter, frame: QPixmap, x: int, y: int
+    ) -> None:
+        """Мягкий светлый контур по альфе кадра (радиус 1–2 px)."""
+        halo = self._outline_halo(frame)
+        if halo.isEmpty():
+            return
+        painter.save()
+        painter.translate(x, y)
+        painter.fillPath(halo, QColor(236, 236, 236, 150))
+        painter.restore()
+
+    def _outline_halo(self, frame: QPixmap) -> QPainterPath:
+        key = int(frame.cacheKey())
+        cached = self._outline_cache.get(key)
+        if cached is not None:
+            return cached
+        halo = _alpha_halo_path(frame)
+        if len(self._outline_cache) > 48:
+            self._outline_cache.clear()
+        self._outline_cache[key] = halo
+        return halo
 
     def _rotated_frame(
         self,
@@ -433,6 +530,21 @@ class FlyWindow(QWidget):
 
     def _on_desktop_reassert(self) -> None:
         """Тик сторожа: видимость + временный topmost при Show Desktop."""
+        try:
+            self._desktop_reassert_tick()
+        finally:
+            self._invoke_z_order_keeper()
+
+    def _invoke_z_order_keeper(self) -> None:
+        cb = self._z_order_keeper
+        if cb is None or self._user_hidden:
+            return
+        try:
+            cb()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("z-order после desktop_reassert: %s", exc)
+
+    def _desktop_reassert_tick(self) -> None:
         if self._user_hidden:
             return
         if self.isMinimized():

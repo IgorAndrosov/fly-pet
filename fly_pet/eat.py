@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
+import math
+import sys
 import time
+from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from PyQt6.QtCore import QObject, QRect, QTimer
-from PyQt6.QtGui import QImage
+from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import QApplication
 
 from fly_pet.desktop_icons import (
@@ -19,14 +23,22 @@ from fly_pet.desktop_icons import (
     user_desktop_path,
 )
 from fly_pet.eat_overlay import (
+    HWND_TOP,
+    HWND_TOPMOST,
+    SWP_NOACTIVATE,
+    SWP_NOMOVE,
+    SWP_NOSIZE,
     Bite,
     IconEatOverlay,
+    _crop_from_full,
     bite_interval_sec,
     count_opaque,
     extract_icon_layers_from_cells,
     grab_icon_cell,
+    grab_screen,
     icon_cell_rect,
     plan_bites,
+    remaining_ratio,
 )
 from fly_pet.phrases import pick
 
@@ -50,6 +62,135 @@ _DIFF_RETRY_MS = 350
 _DIFF_RETRY_MAX = 12
 _MIN_OPAQUE = 200
 _PAINT_WAIT_MS = 700
+_CELL_CLEAR_MS = 80
+_CELL_CLEAR_MAX_MS = 1500
+HEAD_OFFSET_PX = 32.0
+_SWP_FLAGS = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+_PIXEL_DIFF = 18
+
+
+def facing_angle_deg(head_x: float, head_y: float, bite_x: float, bite_y: float) -> float:
+    """Угол носа на точку укуса: 0° вправо, 90° вниз (ось y экрана)."""
+    return math.degrees(math.atan2(bite_y - head_y, bite_x - head_x))
+
+
+def head_delta(angle_deg: float) -> tuple[float, float]:
+    """Смещение головы от центра спрайта на ``HEAD_OFFSET_PX`` по взгляду."""
+    rad = math.radians(angle_deg)
+    return (
+        HEAD_OFFSET_PX * math.cos(rad),
+        HEAD_OFFSET_PX * math.sin(rad),
+    )
+
+
+def window_origin_for_head(
+    bite_x: float,
+    bite_y: float,
+    angle_deg: float,
+    width: int,
+    height: int,
+) -> tuple[int, int]:
+    """Top-left окна так, чтобы голова (центр + 32 px по углу) попала в точку укуса."""
+    dx, dy = head_delta(angle_deg)
+    cx = bite_x - dx
+    cy = bite_y - dy
+    return (
+        int(round(cx - width / 2.0)),
+        int(round(cy - height / 2.0)),
+    )
+
+
+def eaten_percents(left_ratio: float) -> tuple[int, int]:
+    """``(съедено %, остаток маски %)`` из доли остатка. Сумма = 100."""
+    left_pct = int(round(max(0.0, min(1.0, float(left_ratio))) * 100))
+    return 100 - left_pct, left_pct
+
+
+def cell_clear_status(
+    is_empty: Callable[[], bool],
+    elapsed_ms: int,
+    timeout_ms: int = _CELL_CLEAR_MAX_MS,
+) -> str:
+    """Один опрос: ``empty`` / ``timeout`` / ``wait``."""
+    if is_empty():
+        return "empty"
+    if int(elapsed_ms) >= int(timeout_ms):
+        return "timeout"
+    return "wait"
+
+
+def run_cell_clear_wait(
+    is_empty: Callable[[], bool],
+    *,
+    interval_ms: int = _CELL_CLEAR_MS,
+    timeout_ms: int = _CELL_CLEAR_MAX_MS,
+    sleep_ms: Callable[[int], None] | None = None,
+) -> str:
+    """Ждать пустую клетку. ``empty`` сразу — без паузы; по таймауту — ``timeout``."""
+    elapsed = 0
+    while True:
+        status = cell_clear_status(is_empty, elapsed, timeout_ms)
+        if status != "wait":
+            return status
+        step = min(int(interval_ms), int(timeout_ms) - elapsed)
+        if step <= 0:
+            return "timeout"
+        if sleep_ms is not None:
+            sleep_ms(step)
+        elapsed += step
+
+
+def images_nearly_equal(a: QImage, b: QImage, *, ratio: float = 0.05) -> bool:
+    """Доля сильно отличающихся пикселей не больше ``ratio``."""
+    if a.isNull() or b.isNull():
+        return False
+    w = min(a.width(), b.width())
+    h = min(a.height(), b.height())
+    if w <= 0 or h <= 0:
+        return False
+    diff = 0
+    total = w * h
+    for y in range(h):
+        for x in range(w):
+            c0 = a.pixelColor(x, y)
+            c1 = b.pixelColor(x, y)
+            if (
+                abs(c0.red() - c1.red()) > _PIXEL_DIFF
+                or abs(c0.green() - c1.green()) > _PIXEL_DIFF
+                or abs(c0.blue() - c1.blue()) > _PIXEL_DIFF
+            ):
+                diff += 1
+                if diff / total > ratio:
+                    return False
+    return True
+
+
+def _set_window_pos(hwnd: int, insert_after: int) -> bool:
+    """``SetWindowPos`` без сдвига, размера и активации."""
+    if sys.platform != "win32" or not hwnd:
+        return False
+    user32 = ctypes.windll.user32
+    user32.SetWindowPos.argtypes = [
+        wintypes.HWND,
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint,
+    ]
+    user32.SetWindowPos.restype = wintypes.BOOL
+    return bool(
+        user32.SetWindowPos(
+            int(hwnd),
+            int(insert_after),
+            0,
+            0,
+            0,
+            0,
+            _SWP_FLAGS,
+        )
+    )
 
 
 def quarantine_path(data_dir: Path, filename: str) -> Path:
@@ -117,7 +258,13 @@ class DemoEatController(QObject):
         self._interval_sec = 0.3
         self._diff_tries = 0
         self._gone_waited = 0
-        self._phase = "idle"  # locate | empty_bg | appear | eat
+        self._phase = "idle"  # locate | clear_old | appear | eat
+        self._bg_full: QPixmap | None = None
+        self._clear_timer: QTimer | None = None
+        self._clear_elapsed = 0
+        self._clear_probing = False
+        self._cell_empty_fn: Callable[[], bool] | None = None
+        self._finish_pending = False
 
         app = QApplication.instance()
         if app is not None:
@@ -147,20 +294,16 @@ class DemoEatController(QObject):
                 logger.info("старый демо-файл убран в карантин: %s", moved)
             except OSError as exc:
                 logger.warning("не удалось убрать старый демо-файл: %s", exc)
-
-        try:
-            path = create_demo_file(desktop)
-        except OSError as exc:
-            logger.warning("не удалось создать демо-файл: %s", exc)
-            self._say("eat_error")
-            self._busy = False
+            self._phase = "clear_old"
+            self._gone_waited = 0
+            self._poll = QTimer(self)
+            self._poll.setInterval(_GONE_WAIT_MS)
+            self._poll.timeout.connect(self._wait_old_gone_then_create)
+            self._poll.start()
+            self._wait_old_gone_then_create()
             return
 
-        self._demo_path = path
-        notify_shell_create(path)
-        logger.info("создал файл %s (фаза: клетка)", path)
-        self._say("eat_found")
-        self._start_icon_poll(self._on_icon_for_cell)
+        self._capture_and_create()
 
     def _start_icon_poll(self, callback) -> None:
         self._waited_ms = 0
@@ -194,8 +337,57 @@ class DemoEatController(QObject):
             self._teardown_overlay()
             self._busy = False
 
+    def _wait_old_gone_then_create(self) -> None:
+        """Старая иконка должна уйти с экрана до снимка фона."""
+        if not self._busy:
+            return
+        still = None
+        try:
+            still = find_icon_by_filename(DEMO_FILENAME)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ожидание старой иконки: %s", exc)
+        if still is not None:
+            self._gone_waited += _GONE_WAIT_MS
+            if self._gone_waited < _GONE_WAIT_MAX_MS:
+                return
+            logger.info("старая иконка не исчезла — снимаю фон как есть")
+        if self._poll is not None:
+            self._poll.stop()
+            self._poll = None
+        self._capture_and_create()
+
+    def _capture_and_create(self) -> None:
+        """Снимок фона, пока демо-файла нет, затем одно создание файла."""
+        if not self._busy:
+            return
+        try:
+            self._bg_full = grab_screen()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("снимок фона до файла: %s", exc)
+            self._bg_full = QPixmap()
+        full = self._bg_full
+        logger.info(
+            "фон снят до создания файла %sx%s",
+            0 if full is None else full.width(),
+            0 if full is None else full.height(),
+        )
+        try:
+            desktop = user_desktop_path()
+            path = create_demo_file(desktop)
+        except OSError as exc:
+            logger.warning("не удалось создать демо-файл: %s", exc)
+            self._say("eat_error")
+            self._busy = False
+            return
+        self._demo_path = path
+        notify_shell_create(path)
+        logger.info("создал файл %s (фаза: иконка)", path)
+        self._say("eat_found")
+        self._phase = "appear"
+        self._start_icon_poll(self._on_icon_for_cell)
+
     def _on_icon_for_cell(self, icon: dict) -> None:
-        """Фаза 1: знаем клетку → убрать файл → снять пустой фон → вернуть файл."""
+        """Иконка на месте. Фон клетки уже снят до создания файла."""
         if self._icon_on_screen is not None and not self._icon_on_screen(icon):
             self._abort_offscreen()
             return
@@ -212,83 +404,23 @@ class DemoEatController(QObject):
             icon.get("client_x"),
             icon.get("client_y"),
         )
-        path = self._demo_path
-        if path is not None and path.is_file():
-            try:
-                move_to_quarantine(path, self._data_dir)
-            except OSError as exc:
-                logger.warning("не удалось временно убрать файл для фона: %s", exc)
-                self._say("eat_error")
-                self._busy = False
-                return
-        self._phase = "empty_bg"
-        self._gone_waited = 0
-        self._poll = QTimer(self)
-        self._poll.setInterval(_GONE_WAIT_MS)
-        self._poll.timeout.connect(self._wait_gone_then_grab_bg)
-        self._poll.start()
-        self._wait_gone_then_grab_bg()
-
-    def _wait_gone_then_grab_bg(self) -> None:
-        if not self._busy:
-            return
-        still = None
-        try:
-            still = find_icon_by_filename(DEMO_FILENAME)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("ожидание пустой клетки: %s", exc)
-        if still is not None:
-            self._gone_waited += _GONE_WAIT_MS
-            if self._gone_waited < _GONE_WAIT_MAX_MS:
-                return
-            logger.info("иконка не исчезла вовремя — снимаю фон поверх")
-        if self._poll is not None:
-            self._poll.stop()
-            self._poll = None
-
-        if self._cell is None or self._icon is None:
-            self._say("eat_error")
-            self._busy = False
-            return
-        # Пауза: explorer перерисует пустую клетку.
-        QTimer.singleShot(_PAINT_WAIT_MS, self._grab_bg_and_recreate)
-
-    def _grab_bg_and_recreate(self) -> None:
-        if not self._busy or self._icon is None:
-            return
-        try:
-            self._bg_cell = grab_icon_cell(self._icon)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("grab пустой клетки: %s", exc)
-            self._bg_cell = QImage()
-        logger.info(
-            "фон клетки снят %sx%s",
-            0 if self._bg_cell is None else self._bg_cell.width(),
-            0 if self._bg_cell is None else self._bg_cell.height(),
-        )
-
-        try:
-            desktop = user_desktop_path()
-            path = create_demo_file(desktop)
-        except OSError as exc:
-            logger.warning("не удалось вернуть демо-файл: %s", exc)
-            self._say("eat_error")
-            self._busy = False
-            return
-        self._demo_path = path
-        notify_shell_create(path)
-        logger.info("вернул файл %s (фаза: иконка)", path)
+        self._apply_precaptured_bg(cell)
         self._phase = "appear"
-        self._start_icon_poll(self._on_icon_for_eat)
-
-    def _on_icon_for_eat(self, icon: dict) -> None:
-        """Фаза 2: иконка снова на месте — diff и оверлей."""
-        # клетка могла чуть сдвинуться
-        self._cell = icon_cell_rect(icon)
-        self._icon = dict(icon)
         self._diff_tries = 0
-        # explorer дорисовывает глиф после появления в ListView
         QTimer.singleShot(_PAINT_WAIT_MS, self._try_build_overlay)
+
+    def _apply_precaptured_bg(self, cell: QRect) -> None:
+        full = self._bg_full
+        if full is not None and not full.isNull():
+            self._bg_cell = _crop_from_full(full, cell)
+            logger.info(
+                "фон клетки из снимка до файла %sx%s",
+                self._bg_cell.width(),
+                self._bg_cell.height(),
+            )
+            return
+        logger.warning("нет снимка фона до создания файла")
+        self._bg_cell = QImage()
 
     def _try_build_overlay(self) -> None:
         if not self._busy or self._cell is None or self._icon is None:
@@ -330,6 +462,7 @@ class DemoEatController(QObject):
             ]
         self._overlay = IconEatOverlay(cell, bg_out, icon_img)
         self._overlay.show_click_through()
+        self._bind_z_keeper()
         self._raise_z()
         logger.info(
             "оверлей показан, укусов=%s, opaque=%s",
@@ -346,10 +479,7 @@ class DemoEatController(QObject):
         if first is None or loco is None or cell is None:
             self._begin_eat_loop()
             return
-        pet_w = int(self._window.width())
-        pet_h = int(self._window.height())
-        tx = int(cell.x() + first.x - pet_w // 2)
-        ty = int(cell.y() + first.y - pet_h // 2)
+        tx, ty, _angle = self._pose_for_bite(cell.x() + first.x, cell.y() + first.y)
         loco.fly_to(tx, ty, on_arrive=self._begin_eat_loop)
 
     def _locomotion(self) -> Locomotion | None:
@@ -380,19 +510,47 @@ class DemoEatController(QObject):
         if text:
             self._window.say(text)
 
+    def _bind_z_keeper(self) -> None:
+        bind = getattr(self._window, "set_z_order_keeper", None)
+        if callable(bind):
+            bind(self._raise_z)
+
+    def _unbind_z_keeper(self) -> None:
+        bind = getattr(self._window, "set_z_order_keeper", None)
+        if callable(bind):
+            bind(None)
+
     def _raise_z(self) -> None:
+        """Оверлей сразу под мухой, муха — HWND_TOP или HWND_TOPMOST."""
         if self._overlay is None:
             return
         fly_hwnd = int(self._window.winId() or 0)
+        if fly_hwnd == 0:
+            logger.warning("hwnd мухи = 0 — порядок окон не трогаю")
+            return
+        overlay_hwnd = int(self._overlay.winId() or 0)
+        if overlay_hwnd == 0:
+            logger.warning("hwnd оверлея = 0 — порядок окон не трогаю")
+            return
         topmost = bool(getattr(self._window, "_desktop_topmost", False))
-        self._overlay.raise_below(fly_hwnd, topmost=topmost)
-        self._window.raise_()
+        insert = HWND_TOPMOST if topmost else HWND_TOP
+        _set_window_pos(overlay_hwnd, fly_hwnd)
+        _set_window_pos(fly_hwnd, int(insert))
+
+    def _reset_eat_visuals(self) -> None:
+        window = self._window
+        if hasattr(window, "set_sprite_angle_override"):
+            window.set_sprite_angle_override(None)
+        if hasattr(window, "set_readability_outline"):
+            window.set_readability_outline(False)
 
     def _begin_eat_loop(self) -> None:
         logger.info("прожевываю демо-файл укусами")
         self._phase = "eat"
         self._state.mode = "eat"
         self._window.set_state("chew")
+        if hasattr(self._window, "set_readability_outline"):
+            self._window.set_readability_outline(True)
         self._bite_i = 0
         self._eat_t0 = time.monotonic()
         self._raise_z()
@@ -401,18 +559,45 @@ class DemoEatController(QObject):
             return
         self._do_bite()
 
+    def _window_head(self) -> tuple[float, float]:
+        window = self._window
+        angle = float(window.sprite_angle_deg()) if hasattr(window, "sprite_angle_deg") else 0.0
+        dx, dy = head_delta(angle)
+        cx = float(window.x()) + float(window.width()) / 2.0
+        cy = float(window.y()) + float(window.height()) / 2.0
+        return cx + dx, cy + dy
+
+    def _pose_for_bite(self, bite_x: float, bite_y: float) -> tuple[int, int, float]:
+        head_x, head_y = self._window_head()
+        if abs(bite_x - head_x) < 0.5 and abs(bite_y - head_y) < 0.5:
+            angle = (
+                float(self._window.sprite_angle_deg())
+                if hasattr(self._window, "sprite_angle_deg")
+                else 0.0
+            )
+        else:
+            angle = facing_angle_deg(head_x, head_y, bite_x, bite_y)
+        origin = window_origin_for_head(
+            bite_x,
+            bite_y,
+            angle,
+            int(self._window.width()),
+            int(self._window.height()),
+        )
+        return origin[0], origin[1], angle
+
     def _place_fly_on_bite(self, bite: Bite) -> None:
         if self._cell is None:
             return
-        pet_w = int(self._window.width())
-        pet_h = int(self._window.height())
-        tx = int(self._cell.x() + bite.x - pet_w // 2)
-        ty = int(self._cell.y() + bite.y - pet_h // 2)
+        tx, ty, angle = self._pose_for_bite(
+            self._cell.x() + bite.x, self._cell.y() + bite.y
+        )
+        if hasattr(self._window, "set_sprite_angle_override"):
+            self._window.set_sprite_angle_override(angle)
         self._window.move(tx, ty)
         bubble = getattr(self._window, "_bubble", None)
         if bubble is not None and hasattr(bubble, "follow_anchor"):
             bubble.follow_anchor()
-        self._raise_z()
 
     def _do_bite(self) -> None:
         if not self._busy:
@@ -429,6 +614,7 @@ class DemoEatController(QObject):
             left = self._overlay.apply_bite_and_repaint(bite)
         else:
             left = max(0.0, 1.0 - (self._bite_i + 1) / max(1, len(self._bites)))
+        self._raise_z()
 
         n = len(self._bites)
         i = self._bite_i + 1
@@ -449,37 +635,41 @@ class DemoEatController(QObject):
 
         self._bite_i = i
         delay_ms = int(round(self._interval_sec * 1000))
+        if self._bite_timer is not None:
+            self._bite_timer.stop()
         self._bite_timer = QTimer(self)
         self._bite_timer.setSingleShot(True)
         self._bite_timer.timeout.connect(self._do_bite)
         self._bite_timer.start(max(1, delay_ms))
 
+    def _mask_left_ratio(self) -> float:
+        if self._overlay is None:
+            return 0.0
+        return remaining_ratio(self._overlay.mask_image(), self._overlay.icon_image())
+
     def _finish_eat(self) -> None:
+        if self._finish_pending:
+            return
+        self._finish_pending = True
         if self._bite_timer is not None:
             self._bite_timer.stop()
             self._bite_timer = None
+        self._reset_eat_visuals()
 
+        if self._overlay is not None and hasattr(self._overlay, "clear_mask"):
+            self._overlay.clear_mask()
         elapsed = time.monotonic() - self._eat_t0 if self._eat_t0 else 0.0
-        left_pct = 0
-        if self._overlay is not None:
-            from fly_pet.eat_overlay import remaining_ratio
-
-            left_pct = int(
-                round(
-                    remaining_ratio(
-                        self._overlay.mask_image(), self._overlay.icon_image()
-                    )
-                    * 100
-                )
-            )
+        eaten_pct, left_pct = eaten_percents(self._mask_left_ratio())
         logger.info(
-            "съедено 100%% за %.1f с (%s укусов, остаток маски %s%%)",
+            "съедено %s%% за %.1f с (%s укусов, остаток маски %s%%)",
+            eaten_pct,
             elapsed,
             len(self._bites),
             left_pct,
         )
 
-        # Сначала карантин (настоящая иконка исчезает), потом снять оверлей.
+        # Сначала карантин (настоящая иконка исчезает), оверлей держим,
+        # пока клетка на экране не опустеет.
         path = self._demo_path
         if path is not None and path.is_file():
             try:
@@ -491,12 +681,102 @@ class DemoEatController(QObject):
                 self._teardown_overlay()
                 self._restore_life()
                 self._busy = False
+                self._finish_pending = False
                 return
         else:
             logger.warning("демо-файл уже исчез до переноса")
 
-        self._teardown_overlay()
+        if self._overlay is None:
+            self._after_cell_clear("empty")
+            return
+        self._arm_cell_clear()
 
+    def _probe_cell_empty(self) -> bool:
+        if self._cell_empty_fn is not None:
+            return bool(self._cell_empty_fn())
+        return self._cell_cleared_on_screen()
+
+    def _cell_cleared_on_screen(self) -> bool:
+        """Иконки нет в ListView и пиксели клетки совпали с фоном до файла."""
+        if self._icon is None or self._cell is None:
+            return True
+        try:
+            still = find_icon_by_filename(DEMO_FILENAME)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("опрос клетки после карантина: %s", exc)
+            still = None
+        if still is not None:
+            return False
+        bg = self._bg_cell
+        if bg is None or bg.isNull():
+            return True
+        overlay = self._overlay
+        hidden = False
+        if overlay is not None:
+            try:
+                overlay.hide()
+                hidden = True
+                app = QApplication.instance()
+                if app is not None:
+                    app.processEvents()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("скрытие оверлея для пробы клетки: %s", exc)
+                hidden = False
+        try:
+            now = grab_icon_cell(self._icon)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("grab клетки после карантина: %s", exc)
+            now = QImage()
+        empty = images_nearly_equal(now, bg)
+        if hidden and overlay is not None and not empty:
+            try:
+                overlay.show()
+                self._raise_z()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("возврат оверлея: %s", exc)
+        return empty
+
+    def _arm_cell_clear(self) -> None:
+        self._clear_elapsed = 0
+        status = cell_clear_status(self._probe_cell_empty, 0, _CELL_CLEAR_MAX_MS)
+        if status != "wait":
+            self._after_cell_clear(status)
+            return
+        self._clear_timer = QTimer(self)
+        self._clear_timer.setInterval(_CELL_CLEAR_MS)
+        self._clear_timer.timeout.connect(self._on_cell_clear_tick)
+        self._clear_timer.start()
+
+    def _on_cell_clear_tick(self) -> None:
+        if self._clear_probing or not self._finish_pending:
+            return
+        self._clear_probing = True
+        try:
+            self._on_cell_clear_tick_body()
+        finally:
+            self._clear_probing = False
+
+    def _on_cell_clear_tick_body(self) -> None:
+        step = min(_CELL_CLEAR_MS, _CELL_CLEAR_MAX_MS - self._clear_elapsed)
+        if step > 0:
+            self._clear_elapsed += step
+        status = cell_clear_status(
+            self._probe_cell_empty, self._clear_elapsed, _CELL_CLEAR_MAX_MS
+        )
+        if status == "wait":
+            return
+        if self._clear_timer is not None:
+            self._clear_timer.stop()
+            self._clear_timer = None
+        self._after_cell_clear(status)
+
+    def _after_cell_clear(self, status: str) -> None:
+        if status == "timeout":
+            logger.warning(
+                "клетка не опустела за %s мс — снимаю оверлей",
+                _CELL_CLEAR_MAX_MS,
+            )
+        self._teardown_overlay()
         self._state.eaten = int(self._state.eaten) + 1
         self._state.stats["eaten"] = int(self._state.stats.get("eaten", 0)) + 1
         self._state.stats["actions_run"] = int(self._state.stats.get("actions_run", 0)) + 1
@@ -520,11 +800,17 @@ class DemoEatController(QObject):
         self._busy = False
         self._demo_path = None
         self._phase = "idle"
+        self._finish_pending = False
 
     def _teardown_overlay(self) -> None:
         if self._bite_timer is not None:
             self._bite_timer.stop()
             self._bite_timer = None
+        if self._clear_timer is not None:
+            self._clear_timer.stop()
+            self._clear_timer = None
+        self._reset_eat_visuals()
+        self._unbind_z_keeper()
         if self._overlay is not None:
             try:
                 self._overlay.hide()

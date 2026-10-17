@@ -82,6 +82,23 @@ def test_offscreen_icon_aborts_without_overlay(tmp_path: Path) -> None:
     assert window.said == ["файл не на моём экране"]
 
 
+def test_crop_from_full_does_not_depend_on_missing_imports() -> None:
+    """Регрессия: NameError QPoint в _crop_from_full молча валил слот демо."""
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    del app
+    from PyQt6.QtCore import QRect
+    from PyQt6.QtGui import QPixmap
+
+    from fly_pet.eat_overlay import _crop_from_full
+
+    pm = QPixmap(200, 150)
+    pm.fill()
+    img = _crop_from_full(pm, QRect(10, 20, 60, 40))
+    assert (img.width(), img.height()) == (60, 40)
+
+
 def test_quarantine_collision_gets_timestamp(tmp_path: Path) -> None:
     first = quarantine_path(tmp_path, DEMO_FILENAME)
     first.parent.mkdir(parents=True, exist_ok=True)

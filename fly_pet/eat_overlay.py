@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass
 from typing import Sequence
 
-from PyQt6.QtCore import QRect, Qt
+from PyQt6.QtCore import QPoint, QRect, Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPaintEvent, QPixmap
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -459,6 +459,14 @@ class IconEatOverlay(QWidget):
         self._frame = compose_frame(self._bg, self._icon, self._mask)
         self.update()
         return remaining_ratio(self._mask, self._icon)
+
+    def clear_mask(self) -> None:
+        """Добить хвост маски: иконка на оверлее полностью съедена."""
+        if self._mask.isNull():
+            return
+        self._mask.fill(Qt.GlobalColor.transparent)
+        self._frame = compose_frame(self._bg, self._icon, self._mask)
+        self.update()
 
     def show_click_through(self) -> None:
         self.show()
